@@ -11,10 +11,9 @@ const { query } = require('./db');
 let yf = null;
 function getYf() {
   if (yf) return yf;
-  // Load lazily so local SQLite dev doesn't require the package before install
-  yf = require('yahoo-finance2').default;
-  // Silence the deprecation/schema warnings \u2014 they're not actionable.
-  if (yf.suppressNotices) yf.suppressNotices(['yahooSurvey', 'ripHistorical']);
+  // yahoo-finance2 v3+ exposes a class \u2014 instantiate once.
+  const YahooFinance = require('yahoo-finance2').default;
+  yf = new YahooFinance({ suppressNotices: ['yahooSurvey', 'ripHistorical'] });
   return yf;
 }
 
