@@ -153,3 +153,15 @@ tbody tr:last-child td { border-bottom: none; }
   .td-headline { max-width: 260px; }
   .hide-sm { display: none; }
 }
+
+/* Market-data column styling */
+.ticker-primary { font-family: 'JetBrains Mono', monospace; font-weight: 600; color: var(--text); }
+.ticker-counter { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); margin-top: 2px; }
+.ret-pos { color: #10b981; font-weight: 600; }
+.ret-neg { color: #ef4444; font-weight: 600; }
+.badge-country {
+  background: rgba(59, 130, 246, 0.10);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.20);
+  font-variant-numeric: tabular-nums;
+}

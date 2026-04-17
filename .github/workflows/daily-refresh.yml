@@ -1,0 +1,25 @@
+name: Daily Market Data Refresh
+
+# Refresh prices + market cap + FX for all active deals.
+# Runs 30 minutes after the ingest job so any newly-promoted deals get
+# their market data filled in on the same day.
+
+on:
+  schedule:
+    - cron: '30 13 * * *'   # 13:30 UTC daily (30 min after ingest at 13:00 UTC)
+  workflow_dispatch:          # Allow manual trigger from the Actions tab
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/admin/refresh-prices
+        env:
+          INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
+        run: |
+          curl -fsS -X POST \
+            https://special-sits-production.up.railway.app/api/admin/refresh-prices \
+            -H "x-ingest-token: $INGEST_TOKEN" \
+            --max-time 600 \
+            | tee response.json
+          echo ""

@@ -9,6 +9,7 @@ const { query, migrate, parseJson, serializeJson } = require('./db');
 const { fetchAll } = require('./feeds');
 const { classify } = require('./classifier');
 const { prefilter, normalizeHeadline } = require('./prefilter');
+const { refreshDeal } = require('./market_data');
 
 const MAX_CLASSIFY_PER_RUN = parseInt(process.env.MAX_CLASSIFY_PER_RUN || '200', 10);
 
@@ -106,8 +107,17 @@ async function classifyPending() {
       classified++;
 
       if (result.is_special_situation) {
-        await upsertDeal(result, row.id);
+        const dealId = await upsertDeal(result, row.id);
         promoted++;
+        // Fire-and-forget market data refresh (best effort \u2014 don't block ingest)
+        if (dealId) {
+          try {
+            const [fresh] = await query(`SELECT * FROM deals WHERE id = $1`, [dealId]);
+            if (fresh) await refreshDeal(fresh);
+          } catch (e) {
+            console.warn('[classify] market refresh failed for deal', dealId, e.message);
+          }
+        }
       }
     } catch (e) {
       console.error('[classify item]', row.id, e.message);

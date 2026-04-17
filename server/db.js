@@ -120,6 +120,37 @@ async function migrate() {
   await query(`CREATE INDEX IF NOT EXISTS idx_deals_type ON deals(deal_type)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_deals_status ON deals(status)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_deals_region ON deals(region)`);
+
+  // ---- Market-data + geo columns (added later; use ALTER IF NOT EXISTS) ----
+  // Postgres supports ADD COLUMN IF NOT EXISTS natively (9.6+).
+  // SQLite pre-3.35 does not, so we try/ignore duplicate-column errors.
+  const newCols = [
+    ['primary_ticker',       'TEXT'],
+    ['yahoo_symbol',         'TEXT'],
+    ['country',              'TEXT'],
+    ['sector',               'TEXT'],
+    ['industry',             'TEXT'],
+    ['market_cap_usd',       'NUMERIC'],
+    ['currency',             'TEXT'],
+    ['announce_price',       'NUMERIC'],
+    ['market_refreshed_at',  USE_PG ? 'TIMESTAMPTZ' : 'TEXT'],
+  ];
+  for (const [name, type] of newCols) {
+    try {
+      if (USE_PG) {
+        await query(`ALTER TABLE deals ADD COLUMN IF NOT EXISTS ${name} ${type}`);
+      } else {
+        // SQLite: try to add; ignore if already present.
+        await query(`ALTER TABLE deals ADD COLUMN ${name} ${type}`);
+      }
+    } catch (e) {
+      if (!/duplicate column|already exists/i.test(e.message)) {
+        console.warn(`[migrate] ADD COLUMN ${name} failed:`, e.message);
+      }
+    }
+  }
+  await query(`CREATE INDEX IF NOT EXISTS idx_deals_country ON deals(country)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_deals_mcap   ON deals(market_cap_usd)`);
 }
 
 // Portable JSON get/set — SQLite stores JSON as TEXT

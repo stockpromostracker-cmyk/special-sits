@@ -55,6 +55,9 @@ async function renderScreener() {
       <select id="f-type"><option value="">All types</option>${DEAL_TYPES.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select>
       <select id="f-status"><option value="">All statuses</option>${STATUSES.map(s => `<option value="${s}">${cap(s)}</option>`).join('')}</select>
       <select id="f-region"><option value="">All regions</option>${REGIONS.map(r => `<option value="${r}">${r}</option>`).join('')}</select>
+      <select id="f-country"><option value="">All countries</option>${COUNTRIES.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select>
+      <select id="f-mcap"><option value="">Any market cap</option>${MCAP_BUCKETS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select>
+      <select id="f-dsize"><option value="">Any deal size</option>${DEAL_SIZE_BUCKETS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select>
       <span class="spacer"></span>
       <button class="btn-ghost btn" id="f-reset">Reset</button>
     </div>
@@ -63,13 +66,13 @@ async function renderScreener() {
         <thead><tr>
           <th>Type</th>
           <th>Status</th>
-          <th class="hide-sm">Region</th>
+          <th class="hide-sm">Country</th>
           <th>Headline / parties</th>
-          <th>Tickers</th>
-          <th class="hide-sm">Consideration</th>
-          <th class="td-right hide-sm">Deal value ($M)</th>
+          <th>Ticker</th>
+          <th class="td-right hide-sm">Mkt cap</th>
+          <th class="td-right hide-sm">Deal ($M)</th>
+          <th class="td-right">Return</th>
           <th class="hide-sm">Announced</th>
-          <th class="hide-sm">Expected close</th>
         </tr></thead>
         <tbody id="deals-body"><tr><td colspan="9" class="loading">Loading deals…</td></tr></tbody>
       </table>
@@ -79,14 +82,11 @@ async function renderScreener() {
   `;
 
   document.getElementById('f-q').addEventListener('input', debounce(applyFilters, 250));
-  document.getElementById('f-type').addEventListener('change', applyFilters);
-  document.getElementById('f-status').addEventListener('change', applyFilters);
-  document.getElementById('f-region').addEventListener('change', applyFilters);
+  ['f-type','f-status','f-region','f-country','f-mcap','f-dsize'].forEach(id =>
+    document.getElementById(id).addEventListener('change', applyFilters));
   document.getElementById('f-reset').addEventListener('click', () => {
-    document.getElementById('f-q').value = '';
-    document.getElementById('f-type').value = '';
-    document.getElementById('f-status').value = '';
-    document.getElementById('f-region').value = '';
+    ['f-q','f-type','f-status','f-region','f-country','f-mcap','f-dsize']
+      .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
     applyFilters();
   });
   document.getElementById('drawer-backdrop').addEventListener('click', closeDrawer);
@@ -149,16 +149,16 @@ function renderDealsRows() {
     <tr data-id="${d.id}">
       <td><span class="badge badge-type-${d.deal_type}">${labelType(d.deal_type)}</span></td>
       <td><span class="badge badge-status-${d.status || 'announced'}">${cap(d.status || 'announced')}</span></td>
-      <td class="hide-sm">${d.region ? `<span class="badge badge-region">${esc(d.region)}</span>` : ''}</td>
+      <td class="hide-sm">${countryBadge(d)}</td>
       <td class="td-headline">
         <div>${esc(d.headline || '')}</div>
         <div class="sub">${esc(dealParties(d))}</div>
       </td>
-      <td class="td-tickers">${tickers(d)}</td>
-      <td class="hide-sm">${esc(d.consideration || '—')}</td>
-      <td class="td-right hide-sm">${d.deal_value_usd ? fmtM(d.deal_value_usd) : '—'}</td>
+      <td class="td-tickers">${primaryTickerCell(d)}</td>
+      <td class="td-right hide-sm mono">${fmtMcap(d.market_cap_usd)}</td>
+      <td class="td-right hide-sm mono">${d.deal_value_usd ? fmtM(d.deal_value_usd) : '—'}</td>
+      <td class="td-right mono ${returnClass(d.return_pct)}">${fmtReturn(d.return_pct)}</td>
       <td class="hide-sm mono">${d.announce_date || '—'}</td>
-      <td class="hide-sm mono">${d.expected_close_date || '—'}</td>
     </tr>
   `).join('');
   tbody.querySelectorAll('tr').forEach(tr => {
@@ -172,6 +172,9 @@ function applyFilters() {
     type: document.getElementById('f-type').value,
     status: document.getElementById('f-status').value,
     region: document.getElementById('f-region').value,
+    country: document.getElementById('f-country').value,
+    market_cap_bucket: document.getElementById('f-mcap').value,
+    deal_size_bucket: document.getElementById('f-dsize').value,
   };
   loadDeals();
 }
@@ -201,6 +204,21 @@ async function openDrawer(id) {
         ${d.summary ? `<div class="section"><h3>Summary</h3><p>${esc(d.summary)}</p></div>` : ''}
         ${d.thesis ? `<div class="section"><h3>Thesis</h3><p>${esc(d.thesis)}</p></div>` : ''}
         ${d.risks ? `<div class="section"><h3>Risks</h3><p>${esc(d.risks)}</p></div>` : ''}
+
+        <div class="section">
+          <h3>Market snapshot</h3>
+          <dl class="kv">
+            ${row('Primary ticker', d.primary_ticker)}
+            ${row('Country', d.country ? `${COUNTRY_FLAG[d.country] || ''} ${d.country}` : null)}
+            ${row('Sector', d.sector)}
+            ${row('Industry', d.industry)}
+            ${row('Market cap', fmtMcap(d.market_cap_usd))}
+            ${row('Announce price', d.announce_price != null ? `$${Number(d.announce_price).toFixed(2)}` : null)}
+            ${row('Current price', d.current_price != null ? `$${Number(d.current_price).toFixed(2)}` : null)}
+            ${row('Return since announce', (() => { const ap = d.announce_price, cp = d.current_price; if (ap == null || cp == null) return null; const r = ((cp-ap)/ap)*100; return fmtReturn(r); })())}
+            ${row('Refreshed', d.market_refreshed_at ? String(d.market_refreshed_at).slice(0,16) : null)}
+          </dl>
+        </div>
 
         <div class="section">
           <h3>Deal terms</h3>
@@ -393,7 +411,45 @@ function tickers(d) {
     return `${d.parent_ticker || '?'}<span class="arrow">+</span>${d.spinco_ticker || '?'}`;
   return d.target_ticker || d.acquirer_ticker || d.spinco_ticker || '—';
 }
+function primaryTickerCell(d) {
+  const primary = d.primary_ticker || d.target_ticker || d.acquirer_ticker || d.spinco_ticker;
+  if (!primary) return '—';
+  if (d.deal_type === 'merger_arb' && d.acquirer_ticker && d.target_ticker) {
+    return `<div class="ticker-primary">${esc(primary)}</div><div class="ticker-counter">← ${esc(d.acquirer_ticker)}</div>`;
+  }
+  if (d.deal_type === 'spin_off' && d.spinco_ticker && d.parent_ticker !== d.spinco_ticker) {
+    return `<div class="ticker-primary">${esc(primary)}</div><div class="ticker-counter">+ ${esc(d.spinco_ticker)}</div>`;
+  }
+  return `<div class="ticker-primary">${esc(primary)}</div>`;
+}
+const COUNTRY_FLAG = { US:'🇺🇸', GB:'🇬🇧', DE:'🇩🇪', FR:'🇫🇷', NL:'🇳🇱', CH:'🇨🇭',
+  SE:'🇸🇪', DK:'🇩🇰', NO:'🇳🇴', FI:'🇫🇮', IT:'🇮🇹', ES:'🇪🇸',
+  BE:'🇧🇪', IE:'🇮🇪', PT:'🇵🇹', AT:'🇦🇹', PL:'🇵🇱', IS:'🇮🇸' };
+function countryBadge(d) {
+  if (d.country) {
+    const flag = COUNTRY_FLAG[d.country] || '';
+    return `<span class="badge badge-country">${flag} ${esc(d.country)}</span>`;
+  }
+  return d.region ? `<span class="badge badge-region">${esc(d.region)}</span>` : '';
+}
 function fmtM(n) { return (Number(n) / 1_000_000).toLocaleString(undefined, { maximumFractionDigits: 0 }); }
+function fmtMcap(n) {
+  if (n == null) return '—';
+  const v = Number(n);
+  if (v >= 1e12) return `$${(v/1e12).toFixed(1)}T`;
+  if (v >= 1e9)  return `$${(v/1e9).toFixed(1)}B`;
+  if (v >= 1e6)  return `$${(v/1e6).toFixed(0)}M`;
+  return `$${v.toFixed(0)}`;
+}
+function fmtReturn(r) {
+  if (r == null || !isFinite(r)) return '—';
+  const sign = r >= 0 ? '+' : '';
+  return `${sign}${r.toFixed(1)}%`;
+}
+function returnClass(r) {
+  if (r == null || !isFinite(r)) return '';
+  return r >= 0 ? 'ret-pos' : 'ret-neg';
+}
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
 // ---- boot -----------------------------------------------------------------

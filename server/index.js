@@ -6,6 +6,8 @@ const { query, migrate, parseJson, serializeJson } = require('./db');
 const { runCycle, classifyPending } = require('./ingest');
 const { classify } = require('./classifier');
 const { saveRawItems } = require('./feeds');
+const { refreshAllDeals, refreshDeal } = require('./market_data');
+const { marketCapBucket, dealSizeBucket, COUNTRY_TO_REGION } = require('./tickers');
 
 const app = express();
 app.use(cors({ origin: process.env.PUBLIC_URL || '*' }));
@@ -64,23 +66,58 @@ app.get('/api/stats', async (_req, res) => {
   });
 });
 
+// Bucket thresholds — mirror tickers.js and used for server-side filtering.
+const MCAP_BUCKETS = {
+  mega:  [200e9, null],
+  large: [10e9,  200e9],
+  mid:   [2e9,   10e9],
+  small: [300e6, 2e9],
+  micro: [50e6,  300e6],
+  nano:  [0,     50e6],
+};
+const DEAL_BUCKETS = {
+  mega:  [10e9, null],
+  large: [1e9,  10e9],
+  mid:   [100e6, 1e9],
+  small: [0,    100e6],
+};
+
 app.get('/api/deals', async (req, res) => {
-  const { type, status, region, q } = req.query;
+  const { type, status, region, q, country, market_cap_bucket, deal_size_bucket } = req.query;
   const where = [];
   const params = [];
   if (type)   { params.push(type);   where.push(`deal_type = $${params.length}`); }
   if (status) { params.push(status); where.push(`status = $${params.length}`); }
   if (region) { params.push(region); where.push(`region = $${params.length}`); }
+  if (country){ params.push(country);where.push(`country = $${params.length}`); }
+  if (market_cap_bucket && MCAP_BUCKETS[market_cap_bucket]) {
+    const [lo, hi] = MCAP_BUCKETS[market_cap_bucket];
+    params.push(lo); where.push(`market_cap_usd >= $${params.length}`);
+    if (hi != null) { params.push(hi); where.push(`market_cap_usd < $${params.length}`); }
+  }
+  if (deal_size_bucket && DEAL_BUCKETS[deal_size_bucket]) {
+    const [lo, hi] = DEAL_BUCKETS[deal_size_bucket];
+    params.push(lo); where.push(`deal_value_usd >= $${params.length}`);
+    if (hi != null) { params.push(hi); where.push(`deal_value_usd < $${params.length}`); }
+  }
   if (q) {
     params.push(`%${q}%`);
     where.push(`(headline LIKE $${params.length} OR summary LIKE $${params.length}
                   OR target_ticker LIKE $${params.length} OR acquirer_ticker LIKE $${params.length}
-                  OR spinco_ticker LIKE $${params.length})`);
+                  OR spinco_ticker LIKE $${params.length} OR primary_ticker LIKE $${params.length})`);
   }
   const sql = `SELECT * FROM deals ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
                ORDER BY COALESCE(announce_date, first_seen_at) DESC LIMIT 500`;
   const rows = await query(sql, params);
-  res.json(rows.map(serializeDeal));
+  res.json(rows.map(d => {
+    const s = serializeDeal(d);
+    const ap = s.announce_price != null ? Number(s.announce_price) : null;
+    const cp = s.current_price   != null ? Number(s.current_price)   : null;
+    s.return_pct = (ap && cp) ? ((cp - ap) / ap) * 100 : null;
+    s.market_cap_bucket = marketCapBucket(s.market_cap_usd);
+    s.deal_size_bucket  = dealSizeBucket(s.deal_value_usd);
+    return s;
+  }));
 });
 
 app.get('/api/deals/:id', async (req, res) => {
@@ -136,6 +173,37 @@ app.post('/api/ingest/run', requireIngestToken, async (_req, res) => {
   try {
     const result = await runCycle();
     res.json({ ok: true, ...result });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Refresh market data (prices + mcap + FX) for all active deals.
+// Accepts EITHER x-ingest-token (for the cron) OR x-admin-password (for manual UI).
+app.post('/api/admin/refresh-prices', async (req, res) => {
+  const ingestOk = INGEST_TOKEN && req.header('x-ingest-token') === INGEST_TOKEN;
+  const adminOk  = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  if (!ingestOk && !adminOk) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const activeOnly = req.query.all !== '1';
+    const limit = Math.min(parseInt(req.query.limit || '500', 10), 2000);
+    const result = await refreshAllDeals({ activeOnly, limit });
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    console.error('[refresh-prices]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Refresh a single deal by id (admin only).
+app.post('/api/admin/deals/:id/refresh', async (req, res) => {
+  const adminOk = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  if (!adminOk) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const [deal] = await query(`SELECT * FROM deals WHERE id = $1`, [req.params.id]);
+    if (!deal) return res.status(404).json({ error: 'not found' });
+    const r = await refreshDeal(deal);
+    res.json(r);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
