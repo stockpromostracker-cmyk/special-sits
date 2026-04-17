@@ -18,7 +18,32 @@ const DEAL_TYPES = [
   ['other', 'Other'],
 ];
 const STATUSES = ['rumored', 'announced', 'pending', 'closed', 'terminated'];
-const REGIONS = ['US', 'UK', 'EU', 'Nordic', 'Switzerland', 'Global'];
+const REGIONS = ['US', 'UK', 'Europe', 'Nordic', 'Switzerland', 'Global'];
+const COUNTRIES = [
+  ['US','🇺🇸 United States'], ['GB','🇬🇧 United Kingdom'],
+  ['DE','🇩🇪 Germany'],       ['FR','🇫🇷 France'],
+  ['NL','🇳🇱 Netherlands'],   ['CH','🇨🇭 Switzerland'],
+  ['SE','🇸🇪 Sweden'],        ['DK','🇩🇰 Denmark'],
+  ['NO','🇳🇴 Norway'],        ['FI','🇫🇮 Finland'],
+  ['IT','🇮🇹 Italy'],         ['ES','🇪🇸 Spain'],
+  ['BE','🇧🇪 Belgium'],       ['IE','🇮🇪 Ireland'],
+  ['PT','🇵🇹 Portugal'],      ['AT','🇦🇹 Austria'],
+  ['PL','🇵🇱 Poland'],        ['IS','🇮🇸 Iceland'],
+];
+const MCAP_BUCKETS = [
+  ['mega',  'Mega ≥$200B'],
+  ['large', 'Large $10-200B'],
+  ['mid',   'Mid $2-10B'],
+  ['small', 'Small $300M-2B'],
+  ['micro', 'Micro $50-300M'],
+  ['nano',  'Nano <$50M'],
+];
+const DEAL_SIZE_BUCKETS = [
+  ['mega',  'Mega ≥$10B'],
+  ['large', 'Large $1-10B'],
+  ['mid',   'Mid $100M-1B'],
+  ['small', 'Small <$100M'],
+];
 
 let state = { deals: [], stats: null, filters: {}, admin: null };
 
