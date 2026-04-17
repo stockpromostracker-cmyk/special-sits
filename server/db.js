@@ -9,9 +9,13 @@ const USE_PG = !!process.env.DATABASE_URL;
 let pg, sqlite, sqliteDb;
 
 if (USE_PG) {
+  // Railway's internal Postgres (*.railway.internal) doesn't use SSL;
+  // external / proxy hosts typically do. Auto-detect.
+  const url = process.env.DATABASE_URL;
+  const needsSsl = !/railway\.internal/.test(url) && !/localhost/.test(url);
   pg = new (require('pg').Pool)({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false },
+    connectionString: url,
+    ssl: needsSsl ? { rejectUnauthorized: false } : false,
   });
 } else {
   const Database = require('better-sqlite3');
