@@ -1,0 +1,57 @@
+name: Daily Ingest
+
+# Runs the SpecialSits ingestion cycle once a day.
+# Uses GitHub Actions (free) as a replacement for Railway cron on the free plan.
+#
+# Setup (one-time):
+# 1. GitHub repo → Settings → Secrets and variables → Actions → New repository secret
+#    - Name:  INGEST_TOKEN
+#    - Value: (your INGEST_TOKEN from Railway)
+# 2. Commit this file. The workflow will run on the schedule below.
+#
+# You can also trigger it manually from the Actions tab → "Daily Ingest" → "Run workflow".
+
+on:
+  schedule:
+    # 13:00 UTC daily = 09:00 ET (EDT) / 14:00 BST.
+    # GitHub Actions schedules run in UTC and may be delayed by a few minutes under load.
+    - cron: '0 13 * * *'
+  workflow_dispatch:  # lets you run it manually from the Actions tab
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Trigger ingestion
+        env:
+          INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
+          INGEST_URL: https://special-sits-production.up.railway.app/api/ingest/run
+        run: |
+          if [ -z "$INGEST_TOKEN" ]; then
+            echo "::error::INGEST_TOKEN secret is not set. Add it at Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+          echo "Calling $INGEST_URL"
+          response=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" \
+            -X POST "$INGEST_URL" \
+            -H "x-ingest-token: $INGEST_TOKEN" \
+            --max-time 300)
+
+          body=$(echo "$response" | sed -e 's/HTTP_STATUS:.*//g')
+          status=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTP_STATUS://')
+
+          echo "HTTP $status"
+          echo "Response: $body"
+
+          if [ "$status" -ne 200 ]; then
+            echo "::error::Ingest failed with HTTP $status"
+            exit 1
+          fi
+
+          # Pretty-print stats to the job summary
+          echo "### Ingest result" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          echo "$body" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
