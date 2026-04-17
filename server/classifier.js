@@ -67,14 +67,17 @@ async function classify({ headline, body, source }) {
 
   const userText = `SOURCE: ${source}\nHEADLINE: ${headline || ''}\n\nBODY:\n${(body || '').slice(0, 8000)}`;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`;
+  const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${key}`;
   const payload = {
     system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
     contents: [{ role: 'user', parts: [{ text: userText }] }],
     generationConfig: {
       response_mime_type: 'application/json',
       temperature: 0.1,
-      maxOutputTokens: 1024,
+      maxOutputTokens: 2048,
+      // Disable thinking for 2.5 Flash — we just need a structured JSON classification.
+      thinkingConfig: { thinkingBudget: 0 },
     },
   };
 
@@ -85,16 +88,26 @@ async function classify({ headline, body, source }) {
   });
   if (!res.ok) {
     const txt = await res.text();
-    console.error('[classifier] gemini error', res.status, txt.slice(0, 200));
-    return { is_special_situation: false, reason: 'classifier error' };
+    console.error('[classifier] gemini error', res.status, txt.slice(0, 500));
+    return { is_special_situation: false, reason: `classifier error ${res.status}: ${txt.slice(0, 200)}` };
   }
   const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  // Extract text from all parts (Gemini 2.5 may split thinking + answer across parts)
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const text = parts.map(p => p?.text || '').join('').trim();
+  if (!text) {
+    const finish = data?.candidates?.[0]?.finishReason;
+    const block = data?.promptFeedback?.blockReason;
+    console.error('[classifier] empty response', 'finish=', finish, 'block=', block);
+    return { is_special_situation: false, reason: `empty response (finish=${finish || 'none'})` };
+  }
   try {
-    return JSON.parse(text);
+    // Strip any accidental markdown code fences
+    const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+    return JSON.parse(cleaned);
   } catch (e) {
-    console.error('[classifier] parse failed', text.slice(0, 200));
-    return { is_special_situation: false, reason: 'parse error' };
+    console.error('[classifier] parse failed', text.slice(0, 300));
+    return { is_special_situation: false, reason: `parse error: ${text.slice(0, 120)}` };
   }
 }
 
