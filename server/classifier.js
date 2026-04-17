@@ -7,24 +7,34 @@ from a corporate disclosure, filing, or news item, decide whether it describes a
 SITUATION investment opportunity, and if so extract structured deal data.
 
 SPECIAL SITUATIONS include:
-- spin_off          : parent company separating a subsidiary into a new listed entity
-- merger_arb        : an announced acquisition where one listed company is buying another
-- ipo               : initial public offering, direct listing, or listing intention
-- spac              : SPAC business combination, extension, redemption, or launch
-- tender            : tender offer, Dutch auction, mandatory offer
-- buyback           : significant share repurchase program (only if >=5% of shares)
-- rights            : rights issue or rights offering
-- liquidation       : wind-down, liquidation distribution
-- going_private     : management buyout, take-private transaction, SC 13E3
-- activist          : activist investor campaign, board contest, 13D filing with intent
-- share_class       : share class collapse, dual-class unification
-- other             : any other well-defined corporate event with catalyst
+- spin_off          : parent company separating a subsidiary into a NEW LISTED entity whose shares will be distributed to existing shareholders (or sold via IPO with shares going to parent holders)
+- merger_arb        : announced acquisition where BOTH acquirer and target are PUBLICLY LISTED companies, AND the target's stock can be bought by investors to capture the spread to the offer price. MUST have an identifiable public target ticker. Acquisitions of private subsidiaries, private companies, or asset purchases are NOT merger_arb — use 'other' for those.
+- ipo               : initial public offering, direct listing, or explicit listing intention
+- spac              : SPAC business combination, extension, redemption, or de-SPAC launch
+- tender            : tender offer (third-party or issuer), Dutch auction, mandatory offer — the offer is live and investors can tender shares
+- buyback           : significant share repurchase program (ONLY if >=5% of shares outstanding and announced as a program, not a small incremental buy)
+- rights            : rights issue or rights offering to existing holders (not a routine secondary offering)
+- liquidation       : formal wind-down, liquidation distribution to shareholders
+- going_private     : management buyout, take-private transaction, SC 13E3 filing, PE take-out of a listed company
+- activist          : activist investor campaign with named activist + identified target, board/proxy contest, Schedule 13D filed with stated intent (not passive 13G)
+- share_class       : share class collapse, dual-class unification, recap
+- other             : any other well-defined corporate event with a catalyst investors can position around
+
+CRITICAL DISAMBIGUATION — merger_arb vs other:
+- Public company A buys public company B for cash/stock → merger_arb (target ticker = B)
+- Public company A buys PRIVATE company C (or a division of another company) → 'other' (not merger_arb, because there is no tradable target security)
+- Public company A buys a subsidiary / business unit / assets from public company D → 'other'
+- Parent spins OUT a subsidiary to its own shareholders → spin_off (not merger_arb)
+If you cannot identify a publicly-listed TARGET with a ticker, it is NOT merger_arb.
 
 DO NOT classify as special situation:
-- Routine earnings, guidance, dividends (regular), analyst reports
+- Routine earnings, guidance, regular dividends, analyst reports, price targets
 - Small share buybacks under 5%
-- Executive appointments, routine governance
-- Product launches, partnerships, minor operational news
+- Executive appointments, routine governance (use 'activist' only if there's a contest)
+- Product launches, partnerships, minor operational news, clinical trial data
+- Secondary offerings, follow-on equity raises (unless structured as rights issue)
+- Rumors / speculation without named parties
+- Already-closed deals from years ago being referenced retrospectively
 
 Return STRICT JSON (no prose, no markdown fences) with this exact shape:
 

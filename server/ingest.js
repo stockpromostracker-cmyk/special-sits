@@ -8,18 +8,89 @@ require('dotenv').config();
 const { query, migrate, parseJson, serializeJson } = require('./db');
 const { fetchAll } = require('./feeds');
 const { classify } = require('./classifier');
+const { prefilter, normalizeHeadline } = require('./prefilter');
 
 const MAX_CLASSIFY_PER_RUN = parseInt(process.env.MAX_CLASSIFY_PER_RUN || '200', 10);
 
+// Source priority — classify high-signal sources first so that under a tight
+// per-run cap we still get the best deals. Lower number = higher priority.
+const SOURCE_PRIORITY = {
+  'email':              0,
+  'sec_edgar':          1,
+  'prnewswire_ma':      2,
+  'businesswire_ma':    2,
+  // Google News sub-sources
+  'google_news:ma_global':    3,
+  'google_news:ma_cash':      3,
+  'google_news:uk_rule27':    3,
+  'google_news:eu_ma':        3,
+  'google_news:take_private': 3,
+  'google_news:spinoffs':     3,
+  'google_news:ipo_filing':   4,
+  'google_news:ipo_eu':       4,
+  'google_news:tender':       4,
+  'google_news:spac':         4,
+  'google_news:activist':     5,
+  'google_news:rights':       5,
+  'google_news:nordic':       5,
+};
+function priorityOf(source) {
+  if (SOURCE_PRIORITY[source] != null) return SOURCE_PRIORITY[source];
+  if (source?.startsWith('google_news:')) return 5;
+  return 9;
+}
+
 async function classifyPending() {
+  // Pull a generous candidate pool — we'll prefilter/dedupe in memory, then
+  // classify only what survives, up to MAX_CLASSIFY_PER_RUN.
+  const poolSize = MAX_CLASSIFY_PER_RUN * 4;
   const rows = await query(
     `SELECT id, source, headline, body FROM raw_items WHERE status = $1 ORDER BY id DESC LIMIT $2`,
-    ['new', MAX_CLASSIFY_PER_RUN]
+    ['new', poolSize]
   );
-  console.log(`[classify] ${rows.length} pending`);
-  let classified = 0, promoted = 0;
+  console.log(`[classify] ${rows.length} pending in pool`);
+
+  // Sort by source priority so high-signal items are classified first.
+  rows.sort((a, b) => priorityOf(a.source) - priorityOf(b.source) || b.id - a.id);
+
+  // Track normalized-headline hashes already seen to dedupe cross-source duplicates.
+  // Seed from recent classified hits so we don't re-classify same story next day.
+  const seen = new Set();
+  const recentHits = await query(
+    `SELECT headline FROM raw_items WHERE status IN ($1, $2) ORDER BY id DESC LIMIT 2000`,
+    ['classified_hit', 'skipped_duplicate']
+  );
+  for (const r of recentHits) seen.add(normalizeHeadline(r.headline));
+
+  let classified = 0, promoted = 0, skipped_prefilter = 0, skipped_dup = 0;
 
   for (const row of rows) {
+    if (classified >= MAX_CLASSIFY_PER_RUN) break;
+
+    // 1) Prefilter: keyword gate + SEC item-code gate
+    const pre = prefilter({ source: row.source, headline: row.headline, body: row.body });
+    if (!pre.pass) {
+      await query(
+        `UPDATE raw_items SET status = $1, classification = $2 WHERE id = $3`,
+        ['skipped_prefilter', serializeJson({ is_special_situation: false, reason: pre.reason }), row.id]
+      );
+      skipped_prefilter++;
+      continue;
+    }
+
+    // 2) Headline dedupe
+    const norm = normalizeHeadline(row.headline);
+    if (norm && seen.has(norm)) {
+      await query(
+        `UPDATE raw_items SET status = $1, classification = $2 WHERE id = $3`,
+        ['skipped_duplicate', serializeJson({ is_special_situation: false, reason: 'duplicate headline' }), row.id]
+      );
+      skipped_dup++;
+      continue;
+    }
+    if (norm) seen.add(norm);
+
+    // 3) Actually classify via Gemini
     try {
       const result = await classify({
         headline: row.headline,
@@ -43,7 +114,8 @@ async function classifyPending() {
       await query(`UPDATE raw_items SET status = $1 WHERE id = $2`, ['error', row.id]);
     }
   }
-  return { classified, promoted };
+  console.log(`[classify] done: classified=${classified} promoted=${promoted} skipped_prefilter=${skipped_prefilter} skipped_dup=${skipped_dup}`);
+  return { classified, promoted, skipped_prefilter, skipped_dup };
 }
 
 async function upsertDeal(deal, sourceRawId) {
@@ -107,7 +179,7 @@ async function runCycle() {
   console.log(`[ingest] fetched ${fetched} items, ${inserted} new`);
 
   const cls = await classifyPending();
-  console.log(`[ingest] classified ${cls.classified}, promoted ${cls.promoted} to deals`);
+  console.log(`[ingest] classified ${cls.classified}, promoted ${cls.promoted}, skipped_prefilter ${cls.skipped_prefilter}, skipped_dup ${cls.skipped_dup}`);
   return { fetched, inserted, ...cls };
 }
 

@@ -141,6 +141,58 @@ app.post('/api/ingest/run', requireIngestToken, async (_req, res) => {
   }
 });
 
+// Purge deals matching a filter AND reset their source raw_items to 'new' so
+// they get re-classified on next run. Useful after tightening the classifier
+// prompt (e.g., to clean up the old overly-broad merger_arb bucket).
+app.post('/api/ingest/purge-and-reclassify', requireIngestToken, async (req, res) => {
+  try {
+    const { deal_type, region } = req.body || {};
+    if (!deal_type && !region) {
+      return res.status(400).json({ error: 'must provide deal_type and/or region' });
+    }
+    const where = [], params = [];
+    if (deal_type) { params.push(deal_type); where.push(`deal_type = $${params.length}`); }
+    if (region)    { params.push(region);    where.push(`region = $${params.length}`); }
+
+    // Collect all source raw_item ids attached to matching deals
+    const deals = await query(
+      `SELECT id, source_ids FROM deals WHERE ${where.join(' AND ')}`, params
+    );
+    const rawIds = new Set();
+    for (const d of deals) {
+      const ids = parseJson(d.source_ids) || [];
+      ids.forEach(i => rawIds.add(i));
+    }
+
+    // Delete matching deals
+    await query(`DELETE FROM deals WHERE ${where.join(' AND ')}`, params);
+
+    // Reset their raw items to 'new'
+    let resetCount = 0;
+    if (rawIds.size) {
+      const idList = [...rawIds];
+      if (process.env.DATABASE_URL) {
+        const result = await query(
+          `UPDATE raw_items SET status = 'new' WHERE id = ANY($1::int[]) RETURNING id`,
+          [idList]
+        );
+        resetCount = result.length;
+      } else {
+        const placeholders = idList.map((_, i) => `$${i+1}`).join(',');
+        await query(`UPDATE raw_items SET status = 'new' WHERE id IN (${placeholders})`, idList);
+        resetCount = idList.length;
+      }
+    }
+
+    // Re-classify them
+    const cls = await classifyPending();
+    res.json({ ok: true, deals_purged: deals.length, raw_reset: resetCount, ...cls });
+  } catch (e) {
+    console.error('[purge-and-reclassify]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Reset classification on already-seen items so they get re-classified on next run.
 // Useful after improving the classifier prompt or body extraction.
 app.post('/api/ingest/reclassify', requireIngestToken, async (req, res) => {
