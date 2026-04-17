@@ -173,12 +173,25 @@ app.post('/api/admin/login', (req, res) => {
   res.status(401).json({ error: 'bad password' });
 });
 
-app.get('/api/admin/raw', requireAdmin, async (_req, res) => {
-  const rows = await query(
-    `SELECT id, source, headline, status, published_at, fetched_at
-     FROM raw_items ORDER BY id DESC LIMIT 200`, []
-  );
+app.get('/api/admin/raw', requireAdmin, async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit || '200', 10), 2000);
+  const src = req.query.source;
+  const status = req.query.status;
+  const where = [];
+  const params = [];
+  if (src)    { params.push(src);    where.push(`source = $${params.length}`); }
+  if (status) { params.push(status); where.push(`status = $${params.length}`); }
+  const sql = `SELECT id, source, headline, body, status, classification, published_at, fetched_at
+               FROM raw_items ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+               ORDER BY id DESC LIMIT ${limit}`;
+  const rows = await query(sql, params);
   res.json(rows);
+});
+
+app.get('/api/admin/raw/:id', requireAdmin, async (req, res) => {
+  const [row] = await query(`SELECT * FROM raw_items WHERE id = $1`, [req.params.id]);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  res.json(row);
 });
 
 app.post('/api/admin/deals/:id', requireAdmin, async (req, res) => {
