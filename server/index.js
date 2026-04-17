@@ -3,7 +3,7 @@ const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const { query, migrate, parseJson, serializeJson } = require('./db');
-const { runCycle } = require('./ingest');
+const { runCycle, classifyPending } = require('./ingest');
 const { classify } = require('./classifier');
 const { saveRawItems } = require('./feeds');
 
@@ -137,6 +137,30 @@ app.post('/api/ingest/run', requireIngestToken, async (_req, res) => {
     const result = await runCycle();
     res.json({ ok: true, ...result });
   } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Reset classification on already-seen items so they get re-classified on next run.
+// Useful after improving the classifier prompt or body extraction.
+app.post('/api/ingest/reclassify', requireIngestToken, async (req, res) => {
+  try {
+    const onlyMisses = req.body?.onlyMisses !== false; // default: reset misses only
+    const limit = Math.min(parseInt(req.body?.limit || '500', 10), 2000);
+    const whereStatus = onlyMisses ? "status IN ('classified_miss','error')" : "status != 'new'";
+    // Reset to 'new' so classifyPending picks them up
+    const result = await query(
+      `UPDATE raw_items SET status = 'new'
+       WHERE id IN (SELECT id FROM raw_items WHERE ${whereStatus} ORDER BY id DESC LIMIT $1)
+       RETURNING id`,
+      [limit]
+    );
+    const reset = result.length;
+    // Now classify them
+    const cls = await classifyPending();
+    res.json({ ok: true, reset, ...cls });
+  } catch (e) {
+    console.error('[reclassify]', e);
     res.status(500).json({ error: e.message });
   }
 });
