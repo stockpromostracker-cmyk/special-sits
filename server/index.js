@@ -10,6 +10,7 @@ const { refreshAllDeals, refreshDeal } = require('./market_data');
 const { marketCapBucket, dealSizeBucket, COUNTRY_TO_REGION } = require('./tickers');
 const { rollupAll, rollupDeal, listTransactionsForDeal } = require('./incentives');
 const { fetchAllInsider } = require('./insider_feeds');
+const { runAuthoritativeCycle } = require('./authoritative_ingest');
 
 const app = express();
 app.use(cors({ origin: process.env.PUBLIC_URL || '*' }));
@@ -36,7 +37,42 @@ function requireAdmin(req, res, next) {
   next();
 }
 function serializeDeal(d) {
-  return { ...d, source_ids: parseJson(d.source_ids) || [] };
+  const out = { ...d, source_ids: parseJson(d.source_ids) || [] };
+  // key_dates may be JSONB (object) or TEXT (string) depending on backend
+  if (d.key_dates && typeof d.key_dates === 'string') {
+    out.key_dates = parseJson(d.key_dates) || null;
+  }
+  return out;
+}
+
+// Human labels for the new event_type enum
+const EVENT_LABELS = {
+  spin_off_pending:   'Spin-off — pending',
+  spin_off_completed: 'Spin-off — completed',
+  ipo_pending:        'IPO — pending',
+  ipo_recent:         'IPO — recent',
+  merger_pending:     'Merger — pending',
+  merger_completed:   'Merger — completed',
+  demerger_pending:   'Demerger — pending',
+};
+function enrichEvent(d) {
+  // Compute derived day-counters at read time so they're always fresh
+  if (d.key_dates && typeof d.key_dates === 'object' && !Array.isArray(d.key_dates)) {
+    const futures = Object.values(d.key_dates)
+      .filter(Boolean)
+      .map(v => new Date(v))
+      .filter(v => !isNaN(v) && v > new Date())
+      .sort((a, b) => a - b);
+    if (futures.length) {
+      d.days_to_event = Math.round((futures[0] - Date.now()) / 86400000);
+    }
+  }
+  if (d.completed_date) {
+    const diff = Math.round((Date.now() - new Date(d.completed_date)) / 86400000);
+    d.days_since_event = diff >= 0 ? diff : null;
+  }
+  d.event_label = EVENT_LABELS[d.event_type] || null;
+  return d;
 }
 
 // ---- Public API -----------------------------------------------------------
@@ -51,20 +87,35 @@ app.get('/api/stats', async (_req, res) => {
        SUM(CASE WHEN deal_type='spin_off' THEN 1 ELSE 0 END) AS spin_off,
        SUM(CASE WHEN deal_type='ipo' THEN 1 ELSE 0 END) AS ipo,
        SUM(CASE WHEN deal_type='spac' THEN 1 ELSE 0 END) AS spac,
-       COALESCE(SUM(deal_value_usd),0) AS total_value_usd
+       COALESCE(SUM(deal_value_usd),0) AS total_value_usd,
+       SUM(CASE WHEN data_source_tier='official' THEN 1 ELSE 0 END) AS tier_official,
+       SUM(CASE WHEN data_source_tier='aggregator' THEN 1 ELSE 0 END) AS tier_aggregator,
+       SUM(CASE WHEN days_to_event IS NOT NULL AND days_to_event >= 0 AND days_to_event <= 90 THEN 1 ELSE 0 END) AS upcoming_90d,
+       SUM(CASE WHEN days_since_event IS NOT NULL AND days_since_event >= 0 AND days_since_event <= 90 THEN 1 ELSE 0 END) AS recent_90d
      FROM deals`
   );
   const [pending] = await query(
     `SELECT COUNT(*) AS pending_items FROM raw_items WHERE status = $1`, ['new']
   );
+  const eventRows = await query(
+    `SELECT event_type, COUNT(*) AS n FROM deals
+     WHERE event_type IS NOT NULL GROUP BY event_type`
+  );
   // Normalize — Postgres returns strings for COUNT/SUM, SQLite returns numbers.
   const num = (v) => v == null ? 0 : Number(v);
+  const events = {};
+  for (const r of eventRows) events[r.event_type] = num(r.n);
   res.json({
     total: num(totals?.total), active: num(totals?.active),
     merger_arb: num(totals?.merger_arb), spin_off: num(totals?.spin_off),
     ipo: num(totals?.ipo), spac: num(totals?.spac),
     total_value_usd: num(totals?.total_value_usd),
     pending_items: num(pending?.pending_items),
+    tier_official: num(totals?.tier_official),
+    tier_aggregator: num(totals?.tier_aggregator),
+    upcoming_90d: num(totals?.upcoming_90d),
+    recent_90d: num(totals?.recent_90d),
+    events,
   });
 });
 
@@ -86,13 +137,23 @@ const DEAL_BUCKETS = {
 
 app.get('/api/deals', async (req, res) => {
   const { type, status, region, q, country, market_cap_bucket, deal_size_bucket,
-          insider_signal } = req.query;
+          insider_signal, event_type, data_source_tier, timeframe } = req.query;
   const where = [];
   const params = [];
   if (type)   { params.push(type);   where.push(`deal_type = $${params.length}`); }
   if (status) { params.push(status); where.push(`status = $${params.length}`); }
   if (region) { params.push(region); where.push(`region = $${params.length}`); }
   if (country){ params.push(country);where.push(`country = $${params.length}`); }
+  if (event_type)       { params.push(event_type);       where.push(`event_type = $${params.length}`); }
+  if (data_source_tier) { params.push(data_source_tier); where.push(`data_source_tier = $${params.length}`); }
+  // Timeframe buckets based on completed_date / key_dates lookahead
+  if (timeframe === 'upcoming') {
+    where.push(`days_to_event IS NOT NULL AND days_to_event >= 0 AND days_to_event <= 90`);
+  } else if (timeframe === 'recent') {
+    where.push(`days_since_event IS NOT NULL AND days_since_event >= 0 AND days_since_event <= 90`);
+  } else if (timeframe === 'last_30') {
+    where.push(`days_since_event IS NOT NULL AND days_since_event >= 0 AND days_since_event <= 30`);
+  }
   if (market_cap_bucket && MCAP_BUCKETS[market_cap_bucket]) {
     const [lo, hi] = MCAP_BUCKETS[market_cap_bucket];
     params.push(lo); where.push(`market_cap_usd >= $${params.length}`);
@@ -115,11 +176,17 @@ app.get('/api/deals', async (req, res) => {
                   OR target_ticker LIKE $${params.length} OR acquirer_ticker LIKE $${params.length}
                   OR spinco_ticker LIKE $${params.length} OR primary_ticker LIKE $${params.length})`);
   }
+  // Sort order: upcoming → nearest event first; recent → newest first; default → announce/first-seen
+  let orderBy = 'COALESCE(announce_date, first_seen_at) DESC';
+  if (timeframe === 'upcoming') orderBy = 'days_to_event ASC NULLS LAST';
+  else if (timeframe === 'recent' || timeframe === 'last_30') {
+    orderBy = 'completed_date DESC NULLS LAST, filing_date DESC NULLS LAST';
+  }
   const sql = `SELECT * FROM deals ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-               ORDER BY COALESCE(announce_date, first_seen_at) DESC LIMIT 500`;
+               ORDER BY ${orderBy} LIMIT 500`;
   const rows = await query(sql, params);
   res.json(rows.map(d => {
-    const s = serializeDeal(d);
+    const s = enrichEvent(serializeDeal(d));
     const ap = s.announce_price != null ? Number(s.announce_price) : null;
     const cp = s.current_price   != null ? Number(s.current_price)   : null;
     s.return_pct = (ap && cp) ? ((cp - ap) / ap) * 100 : null;
@@ -129,6 +196,37 @@ app.get('/api/deals', async (req, res) => {
     s.incentive_badges = buildIncentiveBadges(s);
     return s;
   }));
+});
+
+// ---- Events (calendar / recent) -----------------------------------------
+// Thin convenience views over /api/deals with pre-set timeframe filters.
+app.get('/api/events/upcoming', async (req, res) => {
+  const days = Math.min(parseInt(req.query.days || '90', 10), 365);
+  const eventType = req.query.event_type;
+  const where = ['days_to_event IS NOT NULL', 'days_to_event >= 0'];
+  const params = [days];
+  where.push(`days_to_event <= $1`);
+  if (eventType) { params.push(eventType); where.push(`event_type = $${params.length}`); }
+  const rows = await query(
+    `SELECT * FROM deals WHERE ${where.join(' AND ')} ORDER BY days_to_event ASC LIMIT 200`,
+    params
+  );
+  res.json(rows.map(d => enrichEvent(serializeDeal(d))));
+});
+
+app.get('/api/events/recent', async (req, res) => {
+  const days = Math.min(parseInt(req.query.days || '90', 10), 365);
+  const eventType = req.query.event_type;
+  const where = ['days_since_event IS NOT NULL', 'days_since_event >= 0'];
+  const params = [days];
+  where.push(`days_since_event <= $1`);
+  if (eventType) { params.push(eventType); where.push(`event_type = $${params.length}`); }
+  const rows = await query(
+    `SELECT * FROM deals WHERE ${where.join(' AND ')}
+     ORDER BY completed_date DESC NULLS LAST, days_since_event ASC LIMIT 200`,
+    params
+  );
+  res.json(rows.map(d => enrichEvent(serializeDeal(d))));
 });
 
 // Build a small list of badge objects summarising the incentive layer. Shown
@@ -161,7 +259,19 @@ function buildIncentiveBadges(d) {
 app.get('/api/deals/:id', async (req, res) => {
   const [deal] = await query(`SELECT * FROM deals WHERE id = $1`, [req.params.id]);
   if (!deal) return res.status(404).json({ error: 'not found' });
-  const d = serializeDeal(deal);
+  const d = enrichEvent(serializeDeal(deal));
+
+  // Attach news_items linked to this deal (from authoritative news-link step)
+  try {
+    const news = await query(
+      `SELECT id, source, url, headline, summary, published_at, matched_ticker, match_kind
+       FROM news_items WHERE deal_id = $1
+       ORDER BY published_at DESC NULLS LAST, id DESC LIMIT 50`,
+      [req.params.id]
+    );
+    d.news_items = news;
+  } catch (_e) { d.news_items = []; }
+
   if (d.source_ids?.length) {
     // Postgres IN with array param — use ANY(); for SQLite expand to placeholders
     let sources;
@@ -427,6 +537,33 @@ app.post('/api/admin/deals/:id', requireAdmin, async (req, res) => {
 app.delete('/api/admin/deals/:id', requireAdmin, async (req, res) => {
   await query(`DELETE FROM deals WHERE id = $1`, [req.params.id]);
   res.json({ ok: true });
+});
+
+// ---- Authoritative ingest ------------------------------------------------
+// Runs the regulator-first pipeline (SEC → LSE → Nordic → StockAnalysis → news link).
+// Accepts EITHER x-ingest-token (for cron) OR x-admin-password (for manual UI).
+app.post('/api/admin/run-auth-ingest', async (req, res) => {
+  const ingestOk = INGEST_TOKEN && req.header('x-ingest-token') === INGEST_TOKEN;
+  const adminOk  = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  if (!ingestOk && !adminOk) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const wipe = req.body?.wipe === true || req.query.wipe === '1';
+    const skipMarket = req.body?.skipMarket === true || req.query.skipMarket === '1';
+    // Heavy operation — may take several minutes. Run async and return immediately
+    // if client asks for fire-and-forget mode via ?async=1.
+    if (req.query.async === '1') {
+      runAuthoritativeCycle({ wipeExisting: wipe, skipMarket }).then(
+        r => console.log('[auth-ingest] async done', JSON.stringify(r)),
+        e => console.error('[auth-ingest] async failed', e)
+      );
+      return res.json({ ok: true, async: true, started: new Date().toISOString() });
+    }
+    const result = await runAuthoritativeCycle({ wipeExisting: wipe, skipMarket });
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    console.error('[run-auth-ingest]', e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ---- Start ---------------------------------------------------------------

@@ -52,6 +52,28 @@ const INSIDER_SIGNALS = [
   ['activist',  '⚔️ Activist on register'],
 ];
 
+// Authoritative event types (regulator-first schema)
+const EVENT_TYPES = [
+  ['spin_off_pending',   'Spin-off — pending'],
+  ['spin_off_completed', 'Spin-off — completed'],
+  ['ipo_pending',        'IPO — pending'],
+  ['ipo_recent',         'IPO — recent'],
+  ['merger_pending',     'Merger — pending'],
+  ['merger_completed',   'Merger — completed'],
+  ['demerger_pending',   'Demerger — pending'],
+];
+// Trust tier badges shown on screener rows
+const TIER_META = {
+  official:   { label: 'Official',   icon: '✅', tooltip: 'Primary source: SEC / LSE RNS / MAR regulator release', cls: 'tier-official' },
+  aggregator: { label: 'Aggregator', icon: '📊', tooltip: 'Secondary source: stockanalysis.com', cls: 'tier-aggregator' },
+  news:       { label: 'News',       icon: '📰', tooltip: 'News-derived only — lower confidence', cls: 'tier-news' },
+};
+const TIMEFRAMES = [
+  ['',         'All deals'],
+  ['upcoming', 'Upcoming (≤ 90d)'],
+  ['recent',   'Recent (≤ 90d)'],
+];
+
 let state = { deals: [], stats: null, filters: {}, admin: null };
 
 // ---- Router ---------------------------------------------------------------
@@ -82,8 +104,13 @@ async function api(path, opts = {}) {
 async function renderScreener() {
   view.innerHTML = `
     <div class="kpis" id="kpis">${skeletonKpis()}</div>
+    <div class="timeframe-tabs" id="timeframe-tabs">
+      ${TIMEFRAMES.map(([v, l]) => `<button class="tf-tab ${v==='' ? 'active' : ''}" data-tf="${v}">${l}</button>`).join('')}
+    </div>
     <div class="filters">
       <input id="f-q" type="search" placeholder="Search tickers, companies, headlines…" />
+      <select id="f-event"><option value="">All events</option>${EVENT_TYPES.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select>
+      <select id="f-tier"><option value="">Any source</option><option value="official">✅ Official only</option><option value="aggregator">📊 Aggregator+</option></select>
       <select id="f-type"><option value="">All types</option>${DEAL_TYPES.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select>
       <select id="f-status"><option value="">All statuses</option>${STATUSES.map(s => `<option value="${s}">${cap(s)}</option>`).join('')}</select>
       <select id="f-region"><option value="">All regions</option>${REGIONS.map(r => `<option value="${r}">${r}</option>`).join('')}</select>
@@ -97,18 +124,17 @@ async function renderScreener() {
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th>Type</th>
-          <th>Status</th>
+          <th>Event</th>
+          <th class="hide-sm">Source</th>
           <th class="hide-sm">Country</th>
           <th>Headline / parties</th>
           <th>Ticker</th>
+          <th class="td-right" id="th-date">Date</th>
           <th class="td-right hide-sm">Mkt cap</th>
-          <th class="td-right hide-sm">Deal ($M)</th>
           <th class="td-right">Return</th>
           <th class="hide-sm">Skin</th>
-          <th class="hide-sm">Announced</th>
         </tr></thead>
-        <tbody id="deals-body"><tr><td colspan="10" class="loading">Loading deals…</td></tr></tbody>
+        <tbody id="deals-body"><tr><td colspan="9" class="loading">Loading deals…</td></tr></tbody>
       </table>
     </div>
     <div class="drawer-backdrop" id="drawer-backdrop"></div>
@@ -116,12 +142,25 @@ async function renderScreener() {
   `;
 
   document.getElementById('f-q').addEventListener('input', debounce(applyFilters, 250));
-  ['f-type','f-status','f-region','f-country','f-mcap','f-dsize','f-insider'].forEach(id =>
+  ['f-type','f-status','f-region','f-country','f-mcap','f-dsize','f-insider','f-event','f-tier'].forEach(id =>
     document.getElementById(id).addEventListener('change', applyFilters));
   document.getElementById('f-reset').addEventListener('click', () => {
-    ['f-q','f-type','f-status','f-region','f-country','f-mcap','f-dsize','f-insider']
+    ['f-q','f-type','f-status','f-region','f-country','f-mcap','f-dsize','f-insider','f-event','f-tier']
       .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+    state.filters.timeframe = '';
+    document.querySelectorAll('.tf-tab').forEach(b => b.classList.toggle('active', b.dataset.tf === ''));
     applyFilters();
+  });
+  document.querySelectorAll('.tf-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tf-tab').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.filters.timeframe = btn.dataset.tf;
+      // Update the Date column header label to match the selected timeframe
+      const th = document.getElementById('th-date');
+      if (th) th.textContent = btn.dataset.tf === 'upcoming' ? 'In' : btn.dataset.tf === 'recent' ? 'Ago' : 'Date';
+      loadDeals();
+    });
   });
   document.getElementById('drawer-backdrop').addEventListener('click', closeDrawer);
 
@@ -137,22 +176,23 @@ async function loadStats() {
     if (!el) return;
     el.innerHTML = `
       ${kpi('Total deals', fmt(s.total))}
-      ${kpi('Active', fmt(s.active))}
-      ${kpi('Merger arb', fmt(s.merger_arb))}
+      ${kpi('Upcoming ≤90d', fmt(s.upcoming_90d), 'kpi-upcoming')}
+      ${kpi('Recent ≤90d', fmt(s.recent_90d), 'kpi-recent')}
+      ${kpi('✅ Official', fmt(s.tier_official), 'kpi-official')}
+      ${kpi('📊 Aggregator', fmt(s.tier_aggregator), 'kpi-aggregator')}
       ${kpi('Spin-offs', fmt(s.spin_off))}
       ${kpi('IPOs', fmt(s.ipo))}
-      ${kpi('SPACs', fmt(s.spac))}
-      ${kpi('Pending items', fmt(s.pending_items))}
+      ${kpi('Mergers', fmt(s.merger_arb))}
     `;
   } catch (e) {
     document.getElementById('kpis').innerHTML = `<div class="kpi">Could not load stats</div>`;
   }
 }
-function kpi(label, value) {
-  return `<div class="kpi"><div class="kpi-label">${label}</div><div class="kpi-value">${value}</div></div>`;
+function kpi(label, value, extraClass) {
+  return `<div class="kpi ${extraClass || ''}"><div class="kpi-label">${label}</div><div class="kpi-value">${value}</div></div>`;
 }
 function skeletonKpis() {
-  return Array(7).fill(0).map(() =>
+  return Array(8).fill(0).map(() =>
     `<div class="kpi"><div class="kpi-label">&nbsp;</div><div class="skel" style="height:22px;width:60%;margin-top:4px"></div></div>`
   ).join('');
 }
@@ -173,32 +213,65 @@ async function loadDeals() {
 function renderDealsRows() {
   const tbody = document.getElementById('deals-body');
   if (!state.deals.length) {
-    tbody.innerHTML = `<tr><td colspan="10" class="empty">
-      <h3>No deals yet</h3>
-      <div>Run the ingestion cycle or forward an alert to your inbox to populate deals.</div>
+    tbody.innerHTML = `<tr><td colspan="9" class="empty">
+      <h3>No deals match</h3>
+      <div>Try clearing filters or selecting another timeframe. If the database is empty, run the authoritative ingest from the Admin page.</div>
     </td></tr>`;
     return;
   }
   tbody.innerHTML = state.deals.map(d => `
     <tr data-id="${d.id}">
-      <td><span class="badge badge-type-${d.deal_type}">${labelType(d.deal_type)}</span></td>
-      <td><span class="badge badge-status-${d.status || 'announced'}">${cap(d.status || 'announced')}</span></td>
+      <td>${eventCell(d)}</td>
+      <td class="hide-sm">${trustBadge(d)}</td>
       <td class="hide-sm">${countryBadge(d)}</td>
       <td class="td-headline">
         <div>${esc(d.headline || '')}</div>
         <div class="sub">${esc(dealParties(d))}</div>
       </td>
       <td class="td-tickers">${primaryTickerCell(d)}</td>
+      <td class="td-right mono">${dateCell(d)}</td>
       <td class="td-right hide-sm mono">${fmtMcap(d.market_cap_usd)}</td>
-      <td class="td-right hide-sm mono">${d.deal_value_usd ? fmtM(d.deal_value_usd) : '—'}</td>
       <td class="td-right mono ${returnClass(d.return_pct)}">${fmtReturn(d.return_pct)}</td>
       <td class="hide-sm">${skinCell(d)}</td>
-      <td class="hide-sm mono">${d.announce_date || '—'}</td>
     </tr>
   `).join('');
   tbody.querySelectorAll('tr').forEach(tr => {
     tr.addEventListener('click', () => openDrawer(tr.dataset.id));
   });
+}
+
+// Event cell: event_type badge (preferred) or falls back to deal_type badge
+function eventCell(d) {
+  if (d.event_type) {
+    const label = EVENT_TYPES.find(([v]) => v === d.event_type)?.[1] || d.event_type;
+    const family = d.event_type.split('_')[0]; // spin | ipo | merger | demerger
+    return `<span class="badge badge-event badge-event-${family}">${esc(label)}</span>`;
+  }
+  return `<span class="badge badge-type-${d.deal_type}">${labelType(d.deal_type)}</span>`;
+}
+
+// Trust badge: official / aggregator / news
+function trustBadge(d) {
+  const tier = d.data_source_tier || 'news';
+  const meta = TIER_META[tier];
+  if (!meta) return '<span style="color:var(--muted)">—</span>';
+  return `<span class="trust-badge ${meta.cls}" title="${esc(meta.tooltip)}"><span class="ic">${meta.icon}</span><span class="lb">${esc(meta.label)}</span></span>`;
+}
+
+// Date cell: shows days-to or days-since depending on the row. Falls back to announce_date.
+function dateCell(d) {
+  if (d.days_to_event != null && d.days_to_event >= 0) {
+    const cls = d.days_to_event <= 14 ? 'date-chip-urgent' : d.days_to_event <= 45 ? 'date-chip-soon' : 'date-chip';
+    return `<span class="${cls}">in ${d.days_to_event}d</span>`;
+  }
+  if (d.days_since_event != null && d.days_since_event >= 0) {
+    const cls = d.days_since_event <= 30 ? 'date-chip-fresh' : 'date-chip';
+    return `<span class="${cls}">${d.days_since_event}d ago</span>`;
+  }
+  if (d.completed_date) return esc(String(d.completed_date).slice(0,10));
+  if (d.announce_date)  return esc(String(d.announce_date).slice(0,10));
+  if (d.filing_date)    return esc(String(d.filing_date).slice(0,10));
+  return '—';
 }
 
 function applyFilters() {
@@ -211,6 +284,9 @@ function applyFilters() {
     market_cap_bucket: document.getElementById('f-mcap').value,
     deal_size_bucket: document.getElementById('f-dsize').value,
     insider_signal: document.getElementById('f-insider').value,
+    event_type: document.getElementById('f-event').value,
+    data_source_tier: document.getElementById('f-tier').value,
+    timeframe: state.filters.timeframe || '',
   };
   loadDeals();
 }
@@ -228,6 +304,7 @@ async function openDrawer(id) {
       api(`/api/deals/${id}`),
       api(`/api/deals/${id}/incentives`).catch(() => null),
     ]);
+    const kd = d.key_dates && typeof d.key_dates === 'object' ? d.key_dates : {};
     drawer.innerHTML = `
       <div class="drawer-head">
         <h2>${esc(d.headline || '')}</h2>
@@ -235,10 +312,14 @@ async function openDrawer(id) {
       </div>
       <div class="drawer-body">
         <div class="drawer-meta">
-          <span class="badge badge-type-${d.deal_type}">${labelType(d.deal_type)}</span>
+          ${d.event_type ? `<span class="badge badge-event badge-event-${d.event_type.split('_')[0]}">${esc(d.event_label || d.event_type)}</span>` : `<span class="badge badge-type-${d.deal_type}">${labelType(d.deal_type)}</span>`}
           <span class="badge badge-status-${d.status || 'announced'}">${cap(d.status || 'announced')}</span>
           ${d.region ? `<span class="badge badge-region">${esc(d.region)}</span>` : ''}
+          ${trustBadge(d)}
+          ${d.days_to_event != null ? `<span class="date-chip-urgent">in ${d.days_to_event}d</span>` :
+            d.days_since_event != null ? `<span class="date-chip-fresh">${d.days_since_event}d ago</span>` : ''}
         </div>
+        ${d.source_filing_url ? `<div class="primary-source"><span class="src-label">Primary source:</span> <a href="${esc(d.source_filing_url)}" target="_blank" rel="noopener">${esc(d.primary_source || 'Filing')} ↗</a></div>` : ''}
 
         ${d.summary ? `<div class="section"><h3>Summary</h3><p>${esc(d.summary)}</p></div>` : ''}
         ${d.thesis ? `<div class="section"><h3>Thesis</h3><p>${esc(d.thesis)}</p></div>` : ''}
@@ -284,17 +365,23 @@ async function openDrawer(id) {
         <div class="section">
           <h3>Timeline</h3>
           <dl class="kv">
+            ${row('Filed', d.filing_date || kd.filing_date)}
             ${row('Announced', d.announce_date)}
-            ${row('Expected close', d.expected_close_date)}
-            ${row('Record date', d.record_date)}
-            ${row('Ex-date', d.ex_date)}
+            ${row('Record date', d.record_date || kd.record_date)}
+            ${row('Ex-date', d.ex_date || kd.ex_date)}
+            ${row('First trade date', kd.first_trade_date)}
+            ${row('Effective date', kd.effective_date)}
+            ${row('Expected close', d.expected_close_date || kd.expected_close_date)}
+            ${row('Completed', d.completed_date || kd.completed_date)}
             ${row('First seen', d.first_seen_at)}
             ${row('Last updated', d.updated_at)}
           </dl>
         </div>
 
+        ${renderNewsTimeline(d.news_items)}
+
         <div class="section">
-          <h3>Sources (${d.sources?.length || 0})</h3>
+          <h3>Other source documents (${d.sources?.length || 0})</h3>
           ${d.sources?.length ? `<ul class="sources-list">${d.sources.map(s => `
             <li>
               <div class="src-source">${esc(s.source)} · ${s.published_at ? esc(String(s.published_at).slice(0,16)) : ''}</div>
@@ -411,6 +498,30 @@ function renderIncentiveSection(inc) {
     </div>`;
 }
 
+// News timeline — matched news_items attached to this deal by the orchestrator
+function renderNewsTimeline(items) {
+  if (!Array.isArray(items) || !items.length) return '';
+  return `
+    <div class="section news-timeline-section">
+      <h3>News timeline <span class="section-count">${items.length}</span></h3>
+      <p class="section-hint">News articles that mention this ticker or issuer name — enrichment only, not source-of-truth.</p>
+      <ul class="news-timeline">
+        ${items.map(n => `
+          <li class="news-item">
+            <div class="news-meta">
+              <span class="news-source">${esc(n.source || 'news')}</span>
+              ${n.published_at ? `<span class="news-date mono">${esc(String(n.published_at).slice(0,10))}</span>` : ''}
+              ${n.match_kind ? `<span class="news-match">via ${esc(n.match_kind.replace('_', ' '))}</span>` : ''}
+            </div>
+            <div class="news-headline">${esc(n.headline || '')}</div>
+            ${n.summary ? `<div class="news-summary">${esc((n.summary || '').slice(0, 220))}${n.summary.length > 220 ? '…' : ''}</div>` : ''}
+            ${n.url ? `<a class="news-link" href="${esc(n.url)}" target="_blank" rel="noopener">Read ↗</a>` : ''}
+          </li>
+        `).join('')}
+      </ul>
+    </div>`;
+}
+
 // ---- Admin ----------------------------------------------------------------
 async function renderAdmin() {
   if (!state.admin) {
@@ -436,9 +547,19 @@ async function renderAdmin() {
 
   view.innerHTML = `
     <div class="admin-section">
-      <h2>Ingestion</h2>
+      <h2>Authoritative ingest <span class="pill-primary">Regulator-first</span></h2>
+      <p class="admin-hint">Runs SEC EDGAR → LSE/Investegate → Nordic MFN → stockanalysis.com → market data → news linkage. News never creates deals — only enriches existing ones.</p>
       <div class="filters">
-        <button class="btn" id="run-ingest">Run ingestion now</button>
+        <label class="chk"><input type="checkbox" id="auth-wipe" /> Wipe existing deals first</label>
+        <button class="btn" id="run-auth">Run authoritative ingest</button>
+        <span id="auth-status" style="color:var(--muted)"></span>
+      </div>
+    </div>
+    <div class="admin-section">
+      <h2>Legacy news ingestion</h2>
+      <p class="admin-hint">Old news-based pipeline. Retained so existing raw_items keep flowing; the authoritative pipeline will match and attach them as news_items.</p>
+      <div class="filters">
+        <button class="btn btn-ghost" id="run-ingest">Run legacy news ingest</button>
         <span id="ingest-status" style="color:var(--muted)"></span>
       </div>
     </div>
@@ -463,15 +584,38 @@ async function renderAdmin() {
     const status = document.getElementById('ingest-status');
     btn.disabled = true; status.textContent = 'Running… this can take a few minutes.';
     try {
-      // NOTE: ingestion uses the INGEST_TOKEN, not admin password. Admin UI asks for it.
-      const token = prompt('Ingest token (from env)');
-      if (!token) { btn.disabled = false; status.textContent = ''; return; }
-      const res = await fetch('/api/ingest/run', { method: 'POST', headers: { 'x-ingest-token': token } });
-      const j = await res.json();
-      status.textContent = res.ok
-        ? `Done — fetched ${j.fetched}, inserted ${j.inserted}, classified ${j.classified}, promoted ${j.promoted}`
-        : `Error: ${j.error || res.statusText}`;
+      const res = await fetch('/api/ingest/run', { method: 'POST', headers: { 'x-admin-password': state.admin } });
+      if (res.status === 401) {
+        const token = prompt('Ingest token (from env)');
+        if (!token) { btn.disabled = false; status.textContent = ''; return; }
+        const res2 = await fetch('/api/ingest/run', { method: 'POST', headers: { 'x-ingest-token': token } });
+        const j2 = await res2.json();
+        status.textContent = res2.ok ? `Done — fetched ${j2.fetched}, classified ${j2.classified}` : `Error: ${j2.error || res2.statusText}`;
+      } else {
+        const j = await res.json();
+        status.textContent = res.ok ? `Done — fetched ${j.fetched}, classified ${j.classified}` : `Error: ${j.error || res.statusText}`;
+      }
       loadAdminTables();
+    } finally { btn.disabled = false; }
+  });
+
+  document.getElementById('run-auth').addEventListener('click', async () => {
+    const btn = document.getElementById('run-auth');
+    const status = document.getElementById('auth-status');
+    const wipe = document.getElementById('auth-wipe').checked;
+    if (wipe && !confirm('Wipe ALL existing deals before re-ingesting? This cannot be undone.')) return;
+    btn.disabled = true;
+    status.textContent = 'Queued — running in background. Refresh stats in 2-5 minutes.';
+    try {
+      const res = await fetch('/api/admin/run-auth-ingest?async=1', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-admin-password': state.admin },
+        body: JSON.stringify({ wipe }),
+      });
+      const j = await res.json();
+      status.textContent = res.ok ? `Started at ${j.started}. Watch server logs for progress.` : `Error: ${j.error || res.statusText}`;
+    } catch (e) {
+      status.textContent = `Error: ${e.message}`;
     } finally { btn.disabled = false; }
   });
 

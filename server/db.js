@@ -152,6 +152,19 @@ async function migrate() {
     ['avg_insider_buy_price',      'NUMERIC'],  // Volume-weighted avg USD price
     ['trading_below_insider_price','INTEGER'],  // 0/1 — current_price below avg_insider_buy_price
     ['insider_refreshed_at',       USE_PG ? 'TIMESTAMPTZ' : 'TEXT'],
+    // Authoritative-source layer (regulator-first rebuild) --------------
+    ['event_type',           'TEXT'],      // spin_off_pending | spin_off_completed | ipo_recent | ipo_pending | merger_pending | merger_completed | demerger_pending
+    ['data_source_tier',     'TEXT'],      // official (regulator) | aggregator (stockanalysis) | news
+    ['primary_source',       'TEXT'],      // sec_10_12b | sec_8k_201 | sec_s1 | sec_424b4 | sec_defm14a | lse_rns | euronext | mfn | stockanalysis_spin | stockanalysis_ipo | news
+    ['source_filing_url',    'TEXT'],      // Direct link to regulator filing / official announcement
+    ['source_cik',           'TEXT'],      // For US: SEC CIK of the filer
+    ['confidence',           'NUMERIC'],   // 0–1: 1.0 = regulator filing; 0.7 = aggregator; 0.3 = news-only
+    ['key_dates',            jsonType],    // JSON: {filing_date, record_date, ex_date, first_trade_date, effective_date, expected_close_date, completed_date}
+    ['completed_date',       'TEXT'],      // YYYY-MM-DD for completed events (first trade / spin effective / merger close)
+    ['filing_date',          'TEXT'],      // First regulator filing date
+    ['ipo_price',            'NUMERIC'],   // For IPOs, offering price
+    ['days_to_event',        'INTEGER'],   // Cached: days from today to next key date (NULL if past)
+    ['days_since_event',     'INTEGER'],   // Cached: days since completion (NULL if pending)
   ];
   for (const [name, type] of newCols) {
     try {
@@ -202,6 +215,36 @@ async function migrate() {
   await query(`CREATE INDEX IF NOT EXISTS idx_insider_tx_ticker ON insider_transactions(issuer_ticker)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_insider_tx_date   ON insider_transactions(transaction_date)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_insider_tx_buy    ON insider_transactions(is_buy)`);
+
+  await query(`CREATE INDEX IF NOT EXISTS idx_deals_event_type  ON deals(event_type)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_deals_tier        ON deals(data_source_tier)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_deals_filing_date ON deals(filing_date)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_deals_completed   ON deals(completed_date)`);
+
+  // ---- News items: attached to a deal, never create a deal on their own ----
+  // Sourced from the legacy news firehose + Gemini classifier. Each item is
+  // linked to a deal via ticker match or fuzzy company-name match.
+  await query(`CREATE TABLE IF NOT EXISTS news_items (
+    id ${pkSerial},
+    deal_id INTEGER,
+    raw_item_id INTEGER,               -- Back-reference to raw_items.id
+    source TEXT,                       -- google_news | rns | etc.
+    url TEXT,
+    headline TEXT NOT NULL,
+    summary TEXT,
+    published_at TEXT,
+    matched_ticker TEXT,               -- The ticker/name that caused the match
+    match_kind TEXT,                   -- ticker | issuer_name | fuzzy
+    fetched_at ${ts}
+  )`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_news_items_deal ON news_items(deal_id)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_news_items_published ON news_items(published_at)`);
+
+  // Ensure unique constraint on raw + deal so we don't double-link
+  try {
+    await query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_news_items_raw_deal
+                 ON news_items(raw_item_id, deal_id)`);
+  } catch (e) { /* ignore */ }
 }
 
 // Portable JSON get/set — SQLite stores JSON as TEXT
