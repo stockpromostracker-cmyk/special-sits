@@ -65,7 +65,31 @@ If it IS a special situation:
   "announce_date": "YYYY-MM-DD or null",
   "expected_close_date": "YYYY-MM-DD or null",
   "record_date": "YYYY-MM-DD or null",
-  "ex_date": "YYYY-MM-DD or null"
+  "ex_date": "YYYY-MM-DD or null",
+
+  // ---- Incentive layer (management & large-owner skin-in-the-game) ----
+  // Extract ONLY when the text explicitly states it. If not mentioned, return null
+  // (or 0 for the booleans). Do NOT guess or infer.
+  "mgmt_moves_to_spinco": 0 or 1,
+      // 1 if a named senior exec (CEO, CFO, COO, Chair) from the parent is
+      //   announced to lead the SpinCo / new entity. Strong conviction signal.
+      //   Example: "Peter Ter Kulve will be CEO of Magnum Ice Cream" → 1.
+  "mgmt_retention_pct": number or null,
+      // % of consideration rolled over by management (take-private / going-private).
+      //   Example: "CEO will roll 40% of his stake into the new entity" → 40.
+  "sponsor_promote_pct": number or null,
+      // SPAC sponsor promote %, typically 20. Only for SPAC deals.
+  "founder_rollover": 0 or 1,
+      // 1 if a named founder is rolling equity rather than fully cashing out
+      //   (take-privates, PE buyouts, merger_arb).
+  "bidder_stake_pre_deal": number or null,
+      // Acquirer's pre-existing % stake in target at announcement.
+      //   Example: "existing 29.9% shareholder" → 29.9.
+  "activist_on_register": 0 or 1,
+      // 1 if a named activist investor (Elliott, Starboard, Pershing Square, Cevian,
+      //   Third Point, Trian, ValueAct, Icahn, JANA, Engine No.1, Politan, etc.)
+      //   is disclosed as a shareholder / 13D filer / campaign target.
+  "incentive_notes": "One sentence explaining the above signals, or null"
 }`;
 
 async function classify({ headline, body, source }) {

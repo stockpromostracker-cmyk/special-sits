@@ -44,6 +44,13 @@ const DEAL_SIZE_BUCKETS = [
   ['mid',   'Mid $100M-1B'],
   ['small', 'Small <$100M'],
 ];
+const INSIDER_SIGNALS = [
+  ['any',       'Any skin-in-the-game'],
+  ['cluster',   '🟢 Cluster insider buying'],
+  ['mgmt_spin', '👤 Mgmt moves to SpinCo'],
+  ['rollover',  '💼 Mgmt/founder rollover'],
+  ['activist',  '⚔️ Activist on register'],
+];
 
 let state = { deals: [], stats: null, filters: {}, admin: null };
 
@@ -83,6 +90,7 @@ async function renderScreener() {
       <select id="f-country"><option value="">All countries</option>${COUNTRIES.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select>
       <select id="f-mcap"><option value="">Any market cap</option>${MCAP_BUCKETS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select>
       <select id="f-dsize"><option value="">Any deal size</option>${DEAL_SIZE_BUCKETS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select>
+      <select id="f-insider"><option value="">Any insider signal</option>${INSIDER_SIGNALS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select>
       <span class="spacer"></span>
       <button class="btn-ghost btn" id="f-reset">Reset</button>
     </div>
@@ -97,9 +105,10 @@ async function renderScreener() {
           <th class="td-right hide-sm">Mkt cap</th>
           <th class="td-right hide-sm">Deal ($M)</th>
           <th class="td-right">Return</th>
+          <th class="hide-sm">Skin</th>
           <th class="hide-sm">Announced</th>
         </tr></thead>
-        <tbody id="deals-body"><tr><td colspan="9" class="loading">Loading deals…</td></tr></tbody>
+        <tbody id="deals-body"><tr><td colspan="10" class="loading">Loading deals…</td></tr></tbody>
       </table>
     </div>
     <div class="drawer-backdrop" id="drawer-backdrop"></div>
@@ -107,10 +116,10 @@ async function renderScreener() {
   `;
 
   document.getElementById('f-q').addEventListener('input', debounce(applyFilters, 250));
-  ['f-type','f-status','f-region','f-country','f-mcap','f-dsize'].forEach(id =>
+  ['f-type','f-status','f-region','f-country','f-mcap','f-dsize','f-insider'].forEach(id =>
     document.getElementById(id).addEventListener('change', applyFilters));
   document.getElementById('f-reset').addEventListener('click', () => {
-    ['f-q','f-type','f-status','f-region','f-country','f-mcap','f-dsize']
+    ['f-q','f-type','f-status','f-region','f-country','f-mcap','f-dsize','f-insider']
       .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
     applyFilters();
   });
@@ -164,7 +173,7 @@ async function loadDeals() {
 function renderDealsRows() {
   const tbody = document.getElementById('deals-body');
   if (!state.deals.length) {
-    tbody.innerHTML = `<tr><td colspan="9" class="empty">
+    tbody.innerHTML = `<tr><td colspan="10" class="empty">
       <h3>No deals yet</h3>
       <div>Run the ingestion cycle or forward an alert to your inbox to populate deals.</div>
     </td></tr>`;
@@ -183,6 +192,7 @@ function renderDealsRows() {
       <td class="td-right hide-sm mono">${fmtMcap(d.market_cap_usd)}</td>
       <td class="td-right hide-sm mono">${d.deal_value_usd ? fmtM(d.deal_value_usd) : '—'}</td>
       <td class="td-right mono ${returnClass(d.return_pct)}">${fmtReturn(d.return_pct)}</td>
+      <td class="hide-sm">${skinCell(d)}</td>
       <td class="hide-sm mono">${d.announce_date || '—'}</td>
     </tr>
   `).join('');
@@ -200,6 +210,7 @@ function applyFilters() {
     country: document.getElementById('f-country').value,
     market_cap_bucket: document.getElementById('f-mcap').value,
     deal_size_bucket: document.getElementById('f-dsize').value,
+    insider_signal: document.getElementById('f-insider').value,
   };
   loadDeals();
 }
@@ -213,7 +224,10 @@ async function openDrawer(id) {
   drawer.querySelector('.drawer-close').addEventListener('click', closeDrawer);
 
   try {
-    const d = await api(`/api/deals/${id}`);
+    const [d, inc] = await Promise.all([
+      api(`/api/deals/${id}`),
+      api(`/api/deals/${id}/incentives`).catch(() => null),
+    ]);
     drawer.innerHTML = `
       <div class="drawer-head">
         <h2>${esc(d.headline || '')}</h2>
@@ -244,6 +258,8 @@ async function openDrawer(id) {
             ${row('Refreshed', d.market_refreshed_at ? String(d.market_refreshed_at).slice(0,16) : null)}
           </dl>
         </div>
+
+        ${renderIncentiveSection(inc)}
 
         <div class="section">
           <h3>Deal terms</h3>
@@ -308,6 +324,91 @@ function nameTicker(name, ticker) {
   if (!name && !ticker) return null;
   if (name && ticker) return `${name} (${ticker})`;
   return name || ticker;
+}
+
+function renderIncentiveSection(inc) {
+  if (!inc || !inc.rollup) return '';
+  const r = inc.rollup || {};
+  const tx = Array.isArray(inc.transactions) ? inc.transactions : [];
+  const badges = Array.isArray(inc.incentive_badges) ? inc.incentive_badges : [];
+
+  const hasAnySignal = badges.length
+    || r.insider_buy_count_6m
+    || r.cluster_buying
+    || r.activist_on_register
+    || r.mgmt_moves_to_spinco
+    || r.founder_rollover
+    || r.incentive_notes
+    || tx.length;
+  if (!hasAnySignal) return '';
+
+  const badgeStrip = badges.length
+    ? `<div class="skin-badges skin-badges-lg">${badges.map(b =>
+        `<span class="skin-badge skin-badge-lg" title="${esc(b.tooltip || '')}"><span class="ic">${b.icon || '•'}</span><span class="lb">${esc(b.label || '')}</span></span>`
+      ).join('')}</div>`
+    : '';
+
+  const kv = `
+    <dl class="kv">
+      ${row('Cluster buying (≥3 insiders, 180d)', r.cluster_buying ? 'Yes' : null)}
+      ${row('Insider buys 180d', r.insider_buy_count_6m ? `${r.insider_buy_count_6m} tx · ${fmtUsdCompact(r.insider_buy_usd_6m)}` : null)}
+      ${row('Insider sells 180d', r.insider_sell_usd_6m ? fmtUsdCompact(r.insider_sell_usd_6m) : null)}
+      ${row('Net insider 180d', r.insider_net_usd_6m != null ? fmtUsdCompact(r.insider_net_usd_6m) : null)}
+      ${row('Avg insider buy price', r.avg_insider_buy_price ? `$${Number(r.avg_insider_buy_price).toFixed(2)}` : null)}
+      ${row('Trading below insider $', r.trading_below_insider_price ? 'Yes' : null)}
+      ${row('Mgmt moves to SpinCo', r.mgmt_moves_to_spinco ? 'Yes' : null)}
+      ${row('Mgmt retention %', r.mgmt_retention_pct != null ? `${r.mgmt_retention_pct}%` : null)}
+      ${row('Sponsor promote %', r.sponsor_promote_pct != null ? `${r.sponsor_promote_pct}%` : null)}
+      ${row('Founder rollover', r.founder_rollover ? 'Yes' : null)}
+      ${row('Bidder stake pre-deal', r.bidder_stake_pre_deal != null ? `${r.bidder_stake_pre_deal}%` : null)}
+      ${row('Activist on register', r.activist_on_register ? 'Yes' : null)}
+      ${row('Refreshed', r.insider_refreshed_at ? String(r.insider_refreshed_at).slice(0,16) : null)}
+    </dl>`;
+
+  const notes = r.incentive_notes
+    ? `<p class="incentive-notes">${esc(r.incentive_notes)}</p>`
+    : '';
+
+  const txTable = tx.length
+    ? `<div class="insider-tx-wrap">
+         <table class="insider-tx">
+           <thead><tr>
+             <th>Date</th><th>Insider</th><th>Title</th><th>Type</th>
+             <th class="td-right">Shares</th><th class="td-right">Price</th><th class="td-right">Value</th><th>Src</th>
+           </tr></thead>
+           <tbody>
+             ${tx.slice(0, 25).map(t => {
+               const type = t.is_ten_percent_owner ? 'Stake' : (t.is_buy === 1 || t.is_buy === true ? 'Buy' : (t.is_buy === 0 || t.is_buy === false ? 'Sell' : '—'));
+               const cls = type === 'Buy' ? 'tx-buy' : type === 'Sell' ? 'tx-sell' : type === 'Stake' ? 'tx-stake' : '';
+               const shares = t.shares ? Number(t.shares).toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—';
+               const price = t.price_per_share ? `$${Number(t.price_per_share).toFixed(2)}` : '—';
+               const value = t.value_usd ? fmtUsdCompact(t.value_usd) : '—';
+               const src = t.source_url ? `<a href="${esc(t.source_url)}" target="_blank" rel="noopener">↗</a>` : '';
+               return `<tr class="insider-tx-row">
+                 <td class="mono">${esc(String(t.transaction_date || '').slice(0,10))}</td>
+                 <td>${esc(t.insider_name || '—')}</td>
+                 <td>${esc(t.insider_title || '')}</td>
+                 <td><span class="tx-badge ${cls}">${type}</span></td>
+                 <td class="td-right mono">${shares}</td>
+                 <td class="td-right mono">${price}</td>
+                 <td class="td-right mono">${value}</td>
+                 <td>${src}</td>
+               </tr>`;
+             }).join('')}
+           </tbody>
+         </table>
+       </div>`
+    : '<p style="color:var(--muted);margin:0">No recent insider transactions matched.</p>';
+
+  return `
+    <div class="section incentive-section">
+      <h3>Incentive layer</h3>
+      ${badgeStrip}
+      ${kv}
+      ${notes}
+      <h4 class="incentive-sub">Recent insider transactions</h4>
+      ${txTable}
+    </div>`;
 }
 
 // ---- Admin ----------------------------------------------------------------
@@ -446,6 +547,22 @@ function primaryTickerCell(d) {
     return `<div class="ticker-primary">${esc(primary)}</div><div class="ticker-counter">+ ${esc(d.spinco_ticker)}</div>`;
   }
   return `<div class="ticker-primary">${esc(primary)}</div>`;
+}
+function skinCell(d) {
+  const badges = Array.isArray(d.incentive_badges) ? d.incentive_badges : [];
+  if (!badges.length) return '<span style="color:var(--muted)">—</span>';
+  return `<div class="skin-badges">${badges.map(b =>
+    `<span class="skin-badge" title="${esc(b.tooltip || b.label || '')}">${b.icon || '•'}</span>`
+  ).join('')}</div>`;
+}
+function fmtUsdCompact(n) {
+  if (n == null || !isFinite(n)) return '—';
+  const v = Math.abs(Number(n));
+  const sign = Number(n) < 0 ? '-' : '';
+  if (v >= 1e9) return `${sign}$${(v/1e9).toFixed(1)}B`;
+  if (v >= 1e6) return `${sign}$${(v/1e6).toFixed(1)}M`;
+  if (v >= 1e3) return `${sign}$${(v/1e3).toFixed(0)}k`;
+  return `${sign}$${v.toFixed(0)}`;
 }
 const COUNTRY_FLAG = { US:'🇺🇸', GB:'🇬🇧', DE:'🇩🇪', FR:'🇫🇷', NL:'🇳🇱', CH:'🇨🇭',
   SE:'🇸🇪', DK:'🇩🇰', NO:'🇳🇴', FI:'🇫🇮', IT:'🇮🇹', ES:'🇪🇸',

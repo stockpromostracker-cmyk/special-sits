@@ -10,6 +10,8 @@ const { fetchAll } = require('./feeds');
 const { classify } = require('./classifier');
 const { prefilter, normalizeHeadline } = require('./prefilter');
 const { refreshDeal } = require('./market_data');
+const { fetchAllInsider } = require('./insider_feeds');
+const { rollupAll } = require('./incentives');
 
 const MAX_CLASSIFY_PER_RUN = parseInt(process.env.MAX_CLASSIFY_PER_RUN || '200', 10);
 
@@ -140,6 +142,18 @@ async function upsertDeal(deal, sourceRawId) {
     existing = rows[0];
   }
 
+  // Incentive fields — COALESCE new-non-null into existing so a later, less-detailed
+  // source doesn't blank out signals we already extracted.
+  const inc = {
+    mgmt_moves_to_spinco: toBool01(deal.mgmt_moves_to_spinco),
+    mgmt_retention_pct:   numOrNull(deal.mgmt_retention_pct),
+    sponsor_promote_pct:  numOrNull(deal.sponsor_promote_pct),
+    founder_rollover:     toBool01(deal.founder_rollover),
+    bidder_stake_pre_deal:numOrNull(deal.bidder_stake_pre_deal),
+    activist_on_register: toBool01(deal.activist_on_register),
+    incentive_notes:      deal.incentive_notes || null,
+  };
+
   if (existing) {
     const prev = parseJson(existing.source_ids) || [];
     if (!prev.includes(sourceRawId)) prev.push(sourceRawId);
@@ -151,10 +165,20 @@ async function upsertDeal(deal, sourceRawId) {
          thesis = COALESCE($4, thesis),
          risks = COALESCE($5, risks),
          source_ids = $6,
+         mgmt_moves_to_spinco = COALESCE($8, mgmt_moves_to_spinco),
+         mgmt_retention_pct   = COALESCE($9, mgmt_retention_pct),
+         sponsor_promote_pct  = COALESCE($10, sponsor_promote_pct),
+         founder_rollover     = COALESCE($11, founder_rollover),
+         bidder_stake_pre_deal= COALESCE($12, bidder_stake_pre_deal),
+         activist_on_register = COALESCE($13, activist_on_register),
+         incentive_notes      = COALESCE($14, incentive_notes),
          updated_at = ${process.env.DATABASE_URL ? 'NOW()' : "datetime('now')"}
        WHERE id = $7`,
       [deal.status, deal.headline, deal.summary, deal.thesis, deal.risks,
-       serializeJson(prev), existing.id]
+       serializeJson(prev), existing.id,
+       inc.mgmt_moves_to_spinco, inc.mgmt_retention_pct, inc.sponsor_promote_pct,
+       inc.founder_rollover, inc.bidder_stake_pre_deal, inc.activist_on_register,
+       inc.incentive_notes]
     );
     return existing.id;
   }
@@ -166,8 +190,10 @@ async function upsertDeal(deal, sourceRawId) {
       parent_name, parent_ticker, spinco_name, spinco_ticker,
       deal_value_usd, consideration, offer_price,
       announce_date, expected_close_date, record_date, ex_date,
-      source_ids
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+      source_ids,
+      mgmt_moves_to_spinco, mgmt_retention_pct, sponsor_promote_pct,
+      founder_rollover, bidder_stake_pre_deal, activist_on_register, incentive_notes
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
     RETURNING id`,
     [
       deal.deal_type, deal.status || 'announced', deal.region, deal.headline,
@@ -177,20 +203,49 @@ async function upsertDeal(deal, sourceRawId) {
       deal.deal_value_usd, deal.consideration, deal.offer_price,
       deal.announce_date, deal.expected_close_date, deal.record_date, deal.ex_date,
       serializeJson([sourceRawId]),
+      inc.mgmt_moves_to_spinco, inc.mgmt_retention_pct, inc.sponsor_promote_pct,
+      inc.founder_rollover, inc.bidder_stake_pre_deal, inc.activist_on_register,
+      inc.incentive_notes,
     ]
   );
   return rows[0]?.id;
 }
 
+function toBool01(v) {
+  if (v === true || v === 1 || v === '1') return 1;
+  if (v === false || v === 0 || v === '0') return 0;
+  return null;
+}
+function numOrNull(v) {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 async function runCycle() {
   await migrate();
-  console.log('[ingest] fetching feeds…');
+
+  // ---- 1. Deal feeds ------------------------------------------------------
+  console.log('[ingest] fetching deal feeds…');
   const { fetched, inserted } = await fetchAll();
   console.log(`[ingest] fetched ${fetched} items, ${inserted} new`);
 
+  // ---- 2. Insider / large-owner feeds ------------------------------------
+  // Runs in parallel with classification below so total wall-clock stays low.
+  const insiderPromise = fetchAllInsider()
+    .catch(e => { console.error('[ingest] insider feeds failed', e.message); return { fetched: 0, inserted: 0 }; });
+
+  // ---- 3. Classify pending deals -----------------------------------------
   const cls = await classifyPending();
   console.log(`[ingest] classified ${cls.classified}, promoted ${cls.promoted}, skipped_prefilter ${cls.skipped_prefilter}, skipped_dup ${cls.skipped_dup}`);
-  return { fetched, inserted, ...cls };
+
+  // ---- 4. Await insider feeds then roll up incentives -------------------
+  const insider = await insiderPromise;
+  const incentives = await rollupAll({ activeOnly: true, limit: 500 })
+    .catch(e => { console.error('[ingest] rollup failed', e.message); return { ok: 0, total: 0 }; });
+  console.log(`[ingest] insider fetched=${insider.fetched} inserted=${insider.inserted}; rollup ok=${incentives.ok}/${incentives.total}`);
+
+  return { fetched, inserted, ...cls, insider_fetched: insider.fetched, insider_inserted: insider.inserted, incentives_rolled: incentives.ok };
 }
 
 if (require.main === module) {

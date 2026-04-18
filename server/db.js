@@ -134,6 +134,24 @@ async function migrate() {
     ['currency',             'TEXT'],
     ['announce_price',       'NUMERIC'],
     ['market_refreshed_at',  USE_PG ? 'TIMESTAMPTZ' : 'TEXT'],
+    // Incentive layer columns ---------------------------------------
+    // Deal-type-specific signals extracted by the LLM classifier.
+    ['mgmt_moves_to_spinco', 'INTEGER'],   // 0/1 — a senior exec (CEO/CFO/COO) announced to lead the spin-off SpinCo
+    ['mgmt_retention_pct',   'NUMERIC'],   // Rollover equity % by mgmt in a take-private / going-private
+    ['sponsor_promote_pct',  'NUMERIC'],   // SPAC sponsor promote %, typically 20
+    ['founder_rollover',     'INTEGER'],   // 0/1 — founder rolling equity rather than cashing out
+    ['bidder_stake_pre_deal','NUMERIC'],   // Acquirer's pre-existing % stake in target (merger_arb)
+    ['activist_on_register', 'INTEGER'],   // 0/1 — known activist holds an on-register stake
+    ['incentive_notes',      'TEXT'],      // Free-text LLM summary of incentive signals
+    // Rollup metrics computed from insider_transactions ---------------
+    ['insider_buy_count_6m',       'INTEGER'],
+    ['insider_buy_usd_6m',         'NUMERIC'],
+    ['insider_sell_usd_6m',        'NUMERIC'],
+    ['insider_net_usd_6m',         'NUMERIC'],
+    ['cluster_buying',             'INTEGER'],  // 0/1 — >=3 distinct insiders bought in last 6m
+    ['avg_insider_buy_price',      'NUMERIC'],  // Volume-weighted avg USD price
+    ['trading_below_insider_price','INTEGER'],  // 0/1 — current_price below avg_insider_buy_price
+    ['insider_refreshed_at',       USE_PG ? 'TIMESTAMPTZ' : 'TEXT'],
   ];
   for (const [name, type] of newCols) {
     try {
@@ -151,6 +169,39 @@ async function migrate() {
   }
   await query(`CREATE INDEX IF NOT EXISTS idx_deals_country ON deals(country)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_deals_mcap   ON deals(market_cap_usd)`);
+
+  // ---- Insider transactions (universal schema across US / UK / Nordic) ----
+  // One row per disclosed transaction. Linked to a deal only when the reporting
+  // issuer matches a deal's primary_ticker — otherwise rows are orphaned and
+  // available for later rollup if a matching deal appears.
+  await query(`CREATE TABLE IF NOT EXISTS insider_transactions (
+    id ${pkSerial},
+    source TEXT NOT NULL,              -- sec_form4 | lse_rns | nasdaq_nordic | oslo | euronext_notif
+    source_id TEXT,                    -- e.g. SEC accession number; RNS announcement id
+    url TEXT,
+    issuer_name TEXT,
+    issuer_country TEXT,               -- ISO-2
+    issuer_ticker TEXT,                -- normalized as EXCHANGE:SYMBOL
+    insider_name TEXT,
+    insider_title TEXT,                -- e.g. CEO, CFO, Director, 10% owner
+    is_director INTEGER DEFAULT 0,
+    is_officer INTEGER DEFAULT 0,
+    is_ten_percent_owner INTEGER DEFAULT 0,
+    transaction_date TEXT,             -- YYYY-MM-DD
+    transaction_code TEXT,             -- P (open market buy), S (open market sale), A (award), etc.
+    is_buy INTEGER,                    -- 1 for open-market purchase, 0 for sale, NULL for other
+    shares NUMERIC,                    -- signed: positive=acquired, negative=disposed
+    price_local NUMERIC,
+    value_local NUMERIC,
+    currency TEXT,
+    price_usd NUMERIC,
+    value_usd NUMERIC,
+    fetched_at ${ts},
+    UNIQUE(source, source_id)
+  )`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_insider_tx_ticker ON insider_transactions(issuer_ticker)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_insider_tx_date   ON insider_transactions(transaction_date)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_insider_tx_buy    ON insider_transactions(is_buy)`);
 }
 
 // Portable JSON get/set — SQLite stores JSON as TEXT

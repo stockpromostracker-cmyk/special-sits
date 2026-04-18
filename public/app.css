@@ -165,3 +165,51 @@ tbody tr:last-child td { border-bottom: none; }
   border: 1px solid rgba(59, 130, 246, 0.20);
   font-variant-numeric: tabular-nums;
 }
+
+/* ---- Incentive layer / Skin column ---- */
+.skin-badges { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.skin-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 22px; height: 22px; padding: 0 5px;
+  background: rgba(167, 139, 250, 0.10);
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  border-radius: 6px; font-size: 13px; line-height: 1; cursor: help;
+}
+.skin-badge:hover { background: rgba(167, 139, 250, 0.18); }
+
+.skin-badges-lg { gap: 8px; margin-bottom: 10px; }
+.skin-badge-lg {
+  min-width: 0; height: auto; padding: 6px 10px; gap: 6px; font-size: 12px;
+  background: rgba(167, 139, 250, 0.08);
+  border-color: rgba(167, 139, 250, 0.30);
+  color: var(--text);
+}
+.skin-badge-lg .ic { font-size: 14px; }
+.skin-badge-lg .lb { font-weight: 500; }
+
+.incentive-section {
+  background: linear-gradient(180deg, rgba(167, 139, 250, 0.04), rgba(167, 139, 250, 0));
+  border-left: 2px solid var(--purple);
+  padding-left: 14px;
+}
+.incentive-section h3 { color: var(--purple); }
+.incentive-sub { margin: 16px 0 8px; font-size: 12px; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+.incentive-notes { margin: 8px 0 0; padding: 8px 10px; background: var(--panel-2);
+  border-left: 2px solid var(--accent-dim); font-size: 13px; color: var(--text); border-radius: 0 6px 6px 0; }
+
+.insider-tx-wrap { overflow-x: auto; margin-top: 6px; }
+.insider-tx { width: 100%; border-collapse: collapse; font-size: 12px; }
+.insider-tx thead th {
+  text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border);
+  color: var(--muted); font-weight: 600; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.insider-tx tbody td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.insider-tx-row:hover { background: var(--panel-2); }
+.insider-tx .td-right { text-align: right; }
+
+.tx-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.tx-buy   { background: rgba(16, 185, 129, 0.12); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.25); }
+.tx-sell  { background: rgba(239, 68, 68, 0.12);  color: #f87171; border: 1px solid rgba(239, 68, 68, 0.25); }
+.tx-stake { background: rgba(96, 165, 250, 0.12); color: #60a5fa; border: 1px solid rgba(96, 165, 250, 0.25); }
