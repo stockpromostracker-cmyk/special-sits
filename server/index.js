@@ -285,6 +285,12 @@ app.get('/api/deals/:id', async (req, res) => {
   const [deal] = await query(`SELECT * FROM deals WHERE id = $1`, [req.params.id]);
   if (!deal) return res.status(404).json({ error: 'not found' });
   const d = enrichEvent(serializeDeal(deal));
+  // Normalise NUMERIC → number so the client can safely .toFixed() etc.
+  for (const k of ['parent_return_pct','spinco_return_pct','parent_baseline_price',
+                    'spinco_baseline_price','parent_current_price','spinco_current_price',
+                    'announce_price','current_price','market_cap_usd','deal_value_usd']) {
+    if (d[k] != null && typeof d[k] === 'string') d[k] = Number(d[k]);
+  }
 
   // Attach news_items linked to this deal (from authoritative news-link step)
   try {

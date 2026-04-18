@@ -741,13 +741,17 @@ function fmtMcap(n) {
   return `$${v.toFixed(0)}`;
 }
 function fmtReturn(r) {
-  if (r == null || !isFinite(r)) return '—';
-  const sign = r >= 0 ? '+' : '';
-  return `${sign}${r.toFixed(1)}%`;
+  if (r == null) return '—';
+  const n = typeof r === 'number' ? r : Number(r);
+  if (!isFinite(n)) return '—';
+  const sign = n >= 0 ? '+' : '';
+  return `${sign}${n.toFixed(1)}%`;
 }
 function returnClass(r) {
-  if (r == null || !isFinite(r)) return '';
-  return r >= 0 ? 'ret-pos' : 'ret-neg';
+  if (r == null) return '';
+  const n = typeof r === 'number' ? r : Number(r);
+  if (!isFinite(n)) return '';
+  return n >= 0 ? 'ret-pos' : 'ret-neg';
 }
 // Renders the Return cell. For spin-offs with split parent/spinco returns, shows
 // compact "P +4.2% / S +18.7%" with color coding on each leg. Falls back to
