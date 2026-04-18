@@ -337,17 +337,19 @@ async function openDrawer(id) {
             ${row('Current price', d.current_price != null ? `$${Number(d.current_price).toFixed(2)}` : null)}
             ${(() => {
               const isSpin = (d.deal_type === 'spin_off') || (d.event_type && d.event_type.startsWith('spin'));
+              // Helper: emit a <dt>/<dd> with raw HTML (bypasses esc() in row())
+              const rawRow = (label, html) => `<dt>${label}</dt><dd>${html != null ? html : '—'}</dd>`;
               if (isSpin && (d.parent_return_pct != null || d.spinco_return_pct != null)) {
                 const pr = d.parent_return_pct, sr = d.spinco_return_pct;
                 const pLabel = `Parent return <span class="kv-hint" title="RemainCo performance since ex-date">ⓘ</span>`;
                 const sLabel = `SpinCo return <span class="kv-hint" title="New entity performance since first trade">ⓘ</span>`;
-                return row(pLabel, pr != null ? `<span class="${returnClass(pr)}">${fmtReturn(pr)}</span>` : null)
-                     + row(sLabel, sr != null ? `<span class="${returnClass(sr)}">${fmtReturn(sr)}</span>` : null);
+                return rawRow(pLabel, pr != null ? `<span class="${returnClass(pr)}">${fmtReturn(pr)}</span>` : null)
+                     + rawRow(sLabel, sr != null ? `<span class="${returnClass(sr)}">${fmtReturn(sr)}</span>` : null);
               }
               const ap = d.announce_price, cp = d.current_price;
               if (ap == null || cp == null) return '';
               const r = ((cp-ap)/ap)*100;
-              return row('Return since announce', `<span class="${returnClass(r)}">${fmtReturn(r)}</span>`);
+              return rawRow('Return since announce', `<span class="${returnClass(r)}">${fmtReturn(r)}</span>`);
             })()}
             ${row('Refreshed', d.market_refreshed_at ? String(d.market_refreshed_at).slice(0,16) : null)}
           </dl>
