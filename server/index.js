@@ -88,6 +88,26 @@ function enrichEvent(d) {
 // ---- Public API -----------------------------------------------------------
 app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
+// Diagnostic: run the bare deals query without serialization/enrichment
+app.get('/api/_diag/deals', async (_req, res) => {
+  const t0 = Date.now();
+  try {
+    const rows = await query(`SELECT id, headline, deal_type, status, announce_date, first_seen_at FROM deals ORDER BY COALESCE(announce_date, first_seen_at) DESC LIMIT 5`);
+    res.json({ ms: Date.now() - t0, count: rows.length, first: rows[0] || null });
+  } catch (e) {
+    res.status(500).json({ error: e.message, ms: Date.now() - t0 });
+  }
+});
+app.get('/api/_diag/deals-full', async (_req, res) => {
+  const t0 = Date.now();
+  try {
+    const rows = await query(`SELECT * FROM deals ORDER BY COALESCE(announce_date, first_seen_at) DESC LIMIT 5`);
+    res.json({ ms: Date.now() - t0, count: rows.length, keys: rows[0] ? Object.keys(rows[0]) : [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message, ms: Date.now() - t0 });
+  }
+});
+
 app.get('/api/stats', async (_req, res) => {
   const [totals] = await query(
     `SELECT
