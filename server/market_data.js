@@ -248,7 +248,7 @@ async function refreshAllDeals({ activeOnly = true, limit = 500 } = {}) {
     ? `WHERE status IN ('announced','pending','rumored','completed')`
     : '';
   const deals = await query(
-    `SELECT * FROM deals ${where} ORDER BY COALESCE(announce_date, first_seen_at) DESC LIMIT $1`,
+    `SELECT * FROM deals ${where} ORDER BY COALESCE(announce_date, ${process.env.DATABASE_URL ? 'first_seen_at::text' : 'first_seen_at'}) DESC LIMIT $1`,
     [limit]
   );
   let ok = 0, skipped = 0, errors = 0;

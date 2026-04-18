@@ -194,9 +194,11 @@ app.get('/api/deals', async (req, res, next) => {
                   OR spinco_ticker ${op} $${params.length} OR primary_ticker ${op} $${params.length})`);
   }
   // Sort order: upcoming → nearest event first; recent → newest first; default → announce/first-seen
-  // Cast both to TEXT — announce_date is TEXT (YYYY-MM-DD), first_seen_at is TIMESTAMP.
-  // COALESCE requires matching types on Postgres.
-  let orderBy = "COALESCE(announce_date, first_seen_at::text) DESC";
+  // COALESCE requires matching types on Postgres; cast first_seen_at (TIMESTAMPTZ)
+  // to TEXT so it can combine with announce_date (TEXT YYYY-MM-DD).
+  // On SQLite first_seen_at is already TEXT — no cast needed.
+  const castFsa = process.env.DATABASE_URL ? 'first_seen_at::text' : 'first_seen_at';
+  let orderBy = `COALESCE(announce_date, ${castFsa}) DESC`;
   if (timeframe === 'upcoming') orderBy = 'days_to_event ASC NULLS LAST';
   else if (timeframe === 'recent' || timeframe === 'last_30') {
     orderBy = 'completed_date DESC NULLS LAST, filing_date DESC NULLS LAST';
