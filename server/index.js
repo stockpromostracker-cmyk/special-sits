@@ -88,26 +88,6 @@ function enrichEvent(d) {
 // ---- Public API -----------------------------------------------------------
 app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
-// Diagnostic: run the bare deals query without serialization/enrichment
-app.get('/api/_diag/deals', async (_req, res) => {
-  const t0 = Date.now();
-  try {
-    const rows = await query(`SELECT id, headline, deal_type, status, announce_date, first_seen_at FROM deals ORDER BY COALESCE(announce_date, first_seen_at) DESC LIMIT 5`);
-    res.json({ ms: Date.now() - t0, count: rows.length, first: rows[0] || null });
-  } catch (e) {
-    res.status(500).json({ error: e.message, ms: Date.now() - t0 });
-  }
-});
-app.get('/api/_diag/deals-full', async (_req, res) => {
-  const t0 = Date.now();
-  try {
-    const rows = await query(`SELECT * FROM deals ORDER BY COALESCE(announce_date, first_seen_at) DESC LIMIT 5`);
-    res.json({ ms: Date.now() - t0, count: rows.length, keys: rows[0] ? Object.keys(rows[0]) : [] });
-  } catch (e) {
-    res.status(500).json({ error: e.message, ms: Date.now() - t0 });
-  }
-});
-
 app.get('/api/stats', async (_req, res) => {
   const [totals] = await query(
     `SELECT
@@ -165,7 +145,8 @@ const DEAL_BUCKETS = {
   small: [0,    100e6],
 };
 
-app.get('/api/deals', async (req, res) => {
+app.get('/api/deals', async (req, res, next) => {
+  try {
   const { type, status, region, q, country, market_cap_bucket, deal_size_bucket,
           insider_signal, event_type, data_source_tier, timeframe } = req.query;
   const where = [];
@@ -213,7 +194,9 @@ app.get('/api/deals', async (req, res) => {
                   OR spinco_ticker ${op} $${params.length} OR primary_ticker ${op} $${params.length})`);
   }
   // Sort order: upcoming → nearest event first; recent → newest first; default → announce/first-seen
-  let orderBy = 'COALESCE(announce_date, first_seen_at) DESC';
+  // Cast both to TEXT — announce_date is TEXT (YYYY-MM-DD), first_seen_at is TIMESTAMP.
+  // COALESCE requires matching types on Postgres.
+  let orderBy = "COALESCE(announce_date, first_seen_at::text) DESC";
   if (timeframe === 'upcoming') orderBy = 'days_to_event ASC NULLS LAST';
   else if (timeframe === 'recent' || timeframe === 'last_30') {
     orderBy = 'completed_date DESC NULLS LAST, filing_date DESC NULLS LAST';
@@ -235,6 +218,7 @@ app.get('/api/deals', async (req, res) => {
     s.incentive_badges = buildIncentiveBadges(s);
     return s;
   }));
+  } catch (e) { console.error('[deals]', e.message); res.status(500).json({ error: e.message }); }
 });
 
 // ---- Events (calendar / recent) -----------------------------------------
