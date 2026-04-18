@@ -21,6 +21,7 @@ const sec          = require('./sources/sec');
 const lse          = require('./sources/lse_rns');
 const nordic       = require('./sources/nordic');
 const stockanalysis = require('./sources/stockanalysis');
+const knownEvents  = require('./sources/known_events');
 const { refreshDeal } = require('./market_data');
 
 // ---- Upsert helper -------------------------------------------------------
@@ -73,6 +74,7 @@ async function upsertDeal(d) {
     expected_close_date: d.expected_close_date || null,
     record_date: d.record_date || null,
     ex_date: d.ex_date || null,
+    thesis: d.thesis || null,
     ipo_price: d.ipo_price ?? null,
     announce_price: d.announce_price ?? null,
     current_price: d.current_price ?? null,
@@ -194,7 +196,7 @@ async function runAuthoritativeCycle({ wipeExisting = false, skipMarket = false 
   }
 
   const results = {
-    sec: null, lse: null, nordic: null, sa: null,
+    sec: null, lse: null, nordic: null, sa: null, known: null,
     upserts: { inserted: 0, updated: 0 },
     news: null,
     market: { refreshed: 0 },
@@ -245,7 +247,19 @@ async function runAuthoritativeCycle({ wipeExisting = false, skipMarket = false 
     }
   } catch (e) { console.error('[auth-ingest] StockAnalysis failed:', e.message); }
 
+  // ---- 4b. Known-events seed (curated famous spin-offs outside auto windows) ----
+  console.log('[auth-ingest] loading known-events seed…');
+  try {
+    results.known = await knownEvents.fetchAll();
+    console.log(`[auth-ingest] Known events: ${results.known.count} curated deals`);
+    for (const d of results.known.deals) {
+      const r = await upsertDeal(d);
+      results.upserts[r.action === 'inserted' ? 'inserted' : 'updated']++;
+    }
+  } catch (e) { console.error('[auth-ingest] known events failed:', e.message); }
+
   // ---- 5. Market-data refresh (price + mcap) ----
+  // Resilient: throttled inside fetchQuote, chunked, errors never propagate.
   if (!skipMarket) {
     console.log('[auth-ingest] refreshing market data for new deals…');
     const newDeals = await query(
@@ -253,13 +267,20 @@ async function runAuthoritativeCycle({ wipeExisting = false, skipMarket = false 
        WHERE primary_ticker IS NOT NULL
          AND (market_refreshed_at IS NULL
               OR market_refreshed_at < ${USE_PG ? "NOW() - INTERVAL '3 days'" : "datetime('now','-3 days')"})
-       ORDER BY id DESC LIMIT 200`
+       ORDER BY id DESC LIMIT 150`
     );
-    for (const d of newDeals) {
-      try { await refreshDeal(d); results.market.refreshed++; }
-      catch (e) { /* market data failures are non-fatal */ }
+    let errors = 0;
+    const CHUNK = 25;
+    for (let i = 0; i < newDeals.length; i += CHUNK) {
+      const chunk = newDeals.slice(i, i + CHUNK);
+      for (const d of chunk) {
+        try { await refreshDeal(d); results.market.refreshed++; }
+        catch (e) { errors++; /* non-fatal */ }
+      }
+      await new Promise(r => setTimeout(r, 500));
     }
-    console.log(`[auth-ingest] market: refreshed ${results.market.refreshed}`);
+    results.market.errors = errors;
+    console.log(`[auth-ingest] market: refreshed ${results.market.refreshed}, errors ${errors}`);
   }
 
   // ---- 6. News linkage ----

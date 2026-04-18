@@ -231,7 +231,7 @@ function renderDealsRows() {
       <td class="td-tickers">${primaryTickerCell(d)}</td>
       <td class="td-right mono">${dateCell(d)}</td>
       <td class="td-right hide-sm mono">${fmtMcap(d.market_cap_usd)}</td>
-      <td class="td-right mono ${returnClass(d.return_pct)}">${fmtReturn(d.return_pct)}</td>
+      <td class="td-right mono">${returnCell(d)}</td>
       <td class="hide-sm">${skinCell(d)}</td>
     </tr>
   `).join('');
@@ -335,7 +335,20 @@ async function openDrawer(id) {
             ${row('Market cap', fmtMcap(d.market_cap_usd))}
             ${row('Announce price', d.announce_price != null ? `$${Number(d.announce_price).toFixed(2)}` : null)}
             ${row('Current price', d.current_price != null ? `$${Number(d.current_price).toFixed(2)}` : null)}
-            ${row('Return since announce', (() => { const ap = d.announce_price, cp = d.current_price; if (ap == null || cp == null) return null; const r = ((cp-ap)/ap)*100; return fmtReturn(r); })())}
+            ${(() => {
+              const isSpin = (d.deal_type === 'spin_off') || (d.event_type && d.event_type.startsWith('spin'));
+              if (isSpin && (d.parent_return_pct != null || d.spinco_return_pct != null)) {
+                const pr = d.parent_return_pct, sr = d.spinco_return_pct;
+                const pLabel = `Parent return <span class="kv-hint" title="RemainCo performance since ex-date">ⓘ</span>`;
+                const sLabel = `SpinCo return <span class="kv-hint" title="New entity performance since first trade">ⓘ</span>`;
+                return row(pLabel, pr != null ? `<span class="${returnClass(pr)}">${fmtReturn(pr)}</span>` : null)
+                     + row(sLabel, sr != null ? `<span class="${returnClass(sr)}">${fmtReturn(sr)}</span>` : null);
+              }
+              const ap = d.announce_price, cp = d.current_price;
+              if (ap == null || cp == null) return '';
+              const r = ((cp-ap)/ap)*100;
+              return row('Return since announce', `<span class="${returnClass(r)}">${fmtReturn(r)}</span>`);
+            })()}
             ${row('Refreshed', d.market_refreshed_at ? String(d.market_refreshed_at).slice(0,16) : null)}
           </dl>
         </div>
@@ -735,6 +748,19 @@ function fmtReturn(r) {
 function returnClass(r) {
   if (r == null || !isFinite(r)) return '';
   return r >= 0 ? 'ret-pos' : 'ret-neg';
+}
+// Renders the Return cell. For spin-offs with split parent/spinco returns, shows
+// compact "P +4.2% / S +18.7%" with color coding on each leg. Falls back to
+// single return_pct otherwise.
+function returnCell(d) {
+  const isSpin = (d.deal_type === 'spin_off') || (d.event_type && d.event_type.startsWith('spin'));
+  const pr = d.parent_return_pct, sr = d.spinco_return_pct;
+  if (isSpin && (pr != null || sr != null)) {
+    const p = pr != null ? `<span class="${returnClass(pr)}" title="Parent (RemainCo) since ex-date">P ${fmtReturn(pr)}</span>` : '<span class="mute">P —</span>';
+    const s = sr != null ? `<span class="${returnClass(sr)}" title="SpinCo since first trade">S ${fmtReturn(sr)}</span>` : '<span class="mute">S —</span>';
+    return `${p} <span class="mute">/</span> ${s}`;
+  }
+  return `<span class="${returnClass(d.return_pct)}">${fmtReturn(d.return_pct)}</span>`;
 }
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 

@@ -32,8 +32,19 @@ const KEYWORDS = [
   { re: /\bostotarjous\b/i,                                event: 'merger_pending', deal: 'merger_arb' }, // FI
 ];
 
-// Extract ISO country from MFN scope field
-const SCOPE_TO_COUNTRY = { SE: 'SE', DK: 'DK', NO: 'NO', FI: 'FI', IS: 'IS' };
+// Nordic country codes we accept. MFN's <x:scope> can be a single ISO code
+// (SE / DK / NO / FI / IS), a comma-separated list ("SE,DK"), or a bloc tag
+// ("EU", "Nordic"). We extract the *first* Nordic code we find, falling back
+// to null if none present.
+const NORDIC_CODES = ['SE', 'DK', 'NO', 'FI', 'IS'];
+function pickNordicCountry(scope) {
+  if (!scope) return null;
+  const parts = String(scope).toUpperCase().split(/[,;\s/|]+/).filter(Boolean);
+  for (const p of parts) if (NORDIC_CODES.includes(p)) return p;
+  // Bloc tags — assume SE if pure EU/Nordic (most MFN issuers)
+  if (parts.some(p => ['EU', 'NORDIC', 'SCANDINAVIA'].includes(p))) return 'SE';
+  return null;
+}
 
 function parseRssItems(xml) {
   const items = [];
@@ -101,7 +112,7 @@ function classifyItem(item) {
 function makeDeal(item) {
   const classification = classifyItem(item);
   if (!classification) return null;
-  const country = SCOPE_TO_COUNTRY[item.scope] || null;
+  const country = pickNordicCountry(item.scope);
   if (!country) return null;  // We only keep items tagged with a Nordic scope
   const ticker = extractTicker(item.description);
   const issuer = extractIssuer(item.title, item.description) || item.title?.slice(0, 60);
@@ -134,13 +145,48 @@ function makeDeal(item) {
   };
 }
 
+// Fetch the MFN firehose RSS, which returns the ~50 latest items.
+// We also walk backwards via the ?before=<pubDate> param to get an older
+// window. Each page returns at most ~50 items; we stop when either we hit the
+// configured pageLimit or the feed returns an empty page.
+async function fetchRssPages(pageLimit = 6) {
+  const all = [];
+  const seenLinks = new Set();
+  let before = null;
+  for (let page = 0; page < pageLimit; page++) {
+    const url = before ? `https://mfn.se/a.rss?before=${encodeURIComponent(before)}` : 'https://mfn.se/a.rss';
+    let xml;
+    try {
+      const res = await fetch(url, {
+        headers: { 'User-Agent': UA, 'Accept': 'application/rss+xml,application/xml' },
+      });
+      if (!res.ok) { console.warn(`[nordic] page ${page} HTTP ${res.status}`); break; }
+      xml = await res.text();
+    } catch (e) {
+      console.warn(`[nordic] page ${page} fetch failed:`, e.message);
+      break;
+    }
+    const items = parseRssItems(xml);
+    if (!items.length) break;
+    let newCount = 0;
+    let oldestDate = null;
+    for (const it of items) {
+      const key = it.link || `${it.title}|${it.pubDate}`;
+      if (!seenLinks.has(key)) { seenLinks.add(key); all.push(it); newCount++; }
+      if (it.pubDate && (!oldestDate || new Date(it.pubDate) < new Date(oldestDate))) {
+        oldestDate = it.pubDate;
+      }
+    }
+    if (newCount === 0 || !oldestDate) break;
+    // Step back one second from the oldest item so we don't re-fetch it.
+    const d = new Date(oldestDate); d.setSeconds(d.getSeconds() - 1);
+    before = d.toISOString();
+  }
+  return all;
+}
+
 async function fetchAll() {
-  const res = await fetch('https://mfn.se/a.rss', {
-    headers: { 'User-Agent': UA, 'Accept': 'application/rss+xml,application/xml' },
-  });
-  if (!res.ok) throw new Error(`MFN RSS ${res.status}`);
-  const xml = await res.text();
-  const items = parseRssItems(xml);
+  const items = await fetchRssPages(8); // ~400 items back, covers ~120-180 days
   const deals = items.map(makeDeal).filter(Boolean);
 
   // De-dupe
@@ -152,4 +198,4 @@ async function fetchAll() {
   return { count: deduped.length, items_scanned: items.length, deals: deduped };
 }
 
-module.exports = { fetchAll, parseRssItems, classifyItem, KEYWORDS };
+module.exports = { fetchAll, fetchRssPages, parseRssItems, classifyItem, pickNordicCountry, KEYWORDS };

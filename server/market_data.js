@@ -5,8 +5,19 @@
 //   fetchQuote(yahooSymbol)   \u2014 one-shot fetch, returns { price, marketCap, currency, sector, industry, shortName }
 //   refreshDeal(deal)         \u2014 populate primary_ticker + market_cap + current_price (+ announce_price on first fetch)
 
-const { pickPrimaryTicker } = require('./tickers');
+const { pickPrimaryTicker, parseTicker } = require('./tickers');
 const { query } = require('./db');
+
+// ---- Yahoo call throttle --------------------------------------------------
+// Yahoo rate-limits aggressively when we blast 200+ symbols in a tight loop.
+// A 300-450ms per-call gap keeps us well under the ~2 req/sec threshold
+// they typically tolerate for unauthenticated clients.
+let _lastYfCall = 0;
+async function throttle(minMs = 300) {
+  const wait = minMs - (Date.now() - _lastYfCall);
+  if (wait > 0) await new Promise(r => setTimeout(r, wait));
+  _lastYfCall = Date.now();
+}
 
 let yf = null;
 function getYf() {
@@ -70,6 +81,7 @@ async function fetchQuote(yahooSymbol) {
   if (!yahooSymbol) return null;
   try {
     await refreshFx();
+    await throttle();
     const q = await getYf().quote(yahooSymbol);
     if (!q) return null;
 
@@ -115,6 +127,7 @@ async function fetchHistoricalPrice(yahooSymbol, dateStr) {
     const end = new Date(date);
     end.setDate(end.getDate() + 5);
 
+    await throttle();
     const hist = await getYf().chart(yahooSymbol, {
       period1: start, period2: end, interval: '1d',
     });
@@ -166,6 +179,50 @@ async function refreshDeal(deal) {
     }
   }
 
+  // ---- Spin-off specific: also fetch parent + spinco prices and returns ----
+  // The generic primary_ticker may be either the parent or the spinco; here we
+  // resolve both explicitly when the deal exposes them as separate fields.
+  if (deal.deal_type === 'spin_off' || (deal.event_type || '').startsWith('spin_off')) {
+    const exDate = deal.ex_date || deal.completed_date ||
+                   (deal.key_dates && typeof deal.key_dates === 'object' && (deal.key_dates.ex_date || deal.key_dates.first_trade_date || deal.key_dates.completed_date));
+
+    const parentParsed = deal.parent_ticker ? parseTicker(deal.parent_ticker) : null;
+    if (parentParsed?.yahooSymbol) {
+      const pq = await fetchQuote(parentParsed.yahooSymbol);
+      if (pq?.priceUsd != null) {
+        updates.parent_current_price = pq.priceUsd;
+        if (exDate && !deal.parent_baseline_price) {
+          const ph = await fetchHistoricalPrice(parentParsed.yahooSymbol, exDate);
+          if (ph?.close != null) {
+            updates.parent_baseline_price = toUsd(ph.close, pq.currency || 'USD') ?? ph.close;
+          }
+        }
+        const base = updates.parent_baseline_price ?? deal.parent_baseline_price;
+        if (base && updates.parent_current_price) {
+          updates.parent_return_pct = ((updates.parent_current_price - base) / base) * 100;
+        }
+      }
+    }
+
+    const spincoParsed = deal.spinco_ticker ? parseTicker(deal.spinco_ticker) : null;
+    if (spincoParsed?.yahooSymbol) {
+      const sq = await fetchQuote(spincoParsed.yahooSymbol);
+      if (sq?.priceUsd != null) {
+        updates.spinco_current_price = sq.priceUsd;
+        if (exDate && !deal.spinco_baseline_price) {
+          const sh = await fetchHistoricalPrice(spincoParsed.yahooSymbol, exDate);
+          if (sh?.close != null) {
+            updates.spinco_baseline_price = toUsd(sh.close, sq.currency || 'USD') ?? sh.close;
+          }
+        }
+        const base = updates.spinco_baseline_price ?? deal.spinco_baseline_price;
+        if (base && updates.spinco_current_price) {
+          updates.spinco_return_pct = ((updates.spinco_current_price - base) / base) * 100;
+        }
+      }
+    }
+  }
+
   // Build SQL SET clause.
   const set = [];
   const params = [];
@@ -182,20 +239,35 @@ async function refreshDeal(deal) {
 }
 
 // Batch refresh. Called from /api/admin/refresh-prices and the daily cron.
+// Resilient: every deal is wrapped in try/catch, Yahoo errors never bubble
+// up to the HTTP layer, and we throttle between calls to stay under Yahoo's
+// rate limit. `limit` defaults to 500 but is sliced into 50-deal chunks with
+// a small pause between chunks to avoid memory spikes.
 async function refreshAllDeals({ activeOnly = true, limit = 500 } = {}) {
   const where = activeOnly
-    ? `WHERE status IN ('announced','pending','rumored')`
+    ? `WHERE status IN ('announced','pending','rumored','completed')`
     : '';
   const deals = await query(
     `SELECT * FROM deals ${where} ORDER BY COALESCE(announce_date, first_seen_at) DESC LIMIT $1`,
     [limit]
   );
-  let ok = 0, skipped = 0;
-  for (const d of deals) {
-    const r = await refreshDeal(d).catch(e => ({ updated: false, reason: e.message }));
-    if (r.updated) ok++; else skipped++;
+  let ok = 0, skipped = 0, errors = 0;
+  const CHUNK = 50;
+  for (let i = 0; i < deals.length; i += CHUNK) {
+    const chunk = deals.slice(i, i + CHUNK);
+    for (const d of chunk) {
+      try {
+        const r = await refreshDeal(d);
+        if (r.updated) ok++; else skipped++;
+      } catch (e) {
+        errors++;
+        console.warn(`[market_data] refreshDeal ${d.id} failed:`, e.message);
+      }
+    }
+    // Breathing room between chunks
+    await new Promise(r => setTimeout(r, 500));
   }
-  return { total: deals.length, refreshed: ok, skipped };
+  return { total: deals.length, refreshed: ok, skipped, errors };
 }
 
 module.exports = {

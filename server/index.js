@@ -17,6 +17,16 @@ app.use(cors({ origin: process.env.PUBLIC_URL || '*' }));
 app.use(express.json({ limit: '5mb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
+// ---- Global safety net ----------------------------------------------------
+// Never let an unhandled promise rejection (e.g. Yahoo throttling) kill the
+// Node process. Log and continue.
+process.on('unhandledRejection', (err) => {
+  console.error('[unhandledRejection]', err && err.message ? err.message : err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err && err.message ? err.message : err);
+});
+
 const PORT = process.env.PORT || 3000;
 const INGEST_TOKEN = process.env.INGEST_TOKEN || '';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
@@ -171,10 +181,16 @@ app.get('/api/deals', async (req, res) => {
   else if (insider_signal === 'activist')   where.push(`activist_on_register = 1`);
   else if (insider_signal === 'any')        where.push(`(cluster_buying = 1 OR mgmt_moves_to_spinco = 1 OR founder_rollover = 1 OR activist_on_register = 1)`);
   if (q) {
+    // Postgres: case-insensitive ILIKE + pg_trgm GIN indexes on headline /
+    // target_name make substring searches fast. SQLite: LIKE is case-insensitive
+    // for ASCII by default, translates fine.
     params.push(`%${q}%`);
-    where.push(`(headline LIKE $${params.length} OR summary LIKE $${params.length}
-                  OR target_ticker LIKE $${params.length} OR acquirer_ticker LIKE $${params.length}
-                  OR spinco_ticker LIKE $${params.length} OR primary_ticker LIKE $${params.length})`);
+    const op = process.env.DATABASE_URL ? 'ILIKE' : 'LIKE';
+    where.push(`(headline ${op} $${params.length} OR summary ${op} $${params.length}
+                  OR target_name ${op} $${params.length}
+                  OR parent_name ${op} $${params.length} OR spinco_name ${op} $${params.length}
+                  OR target_ticker ${op} $${params.length} OR acquirer_ticker ${op} $${params.length}
+                  OR spinco_ticker ${op} $${params.length} OR primary_ticker ${op} $${params.length})`);
   }
   // Sort order: upcoming → nearest event first; recent → newest first; default → announce/first-seen
   let orderBy = 'COALESCE(announce_date, first_seen_at) DESC';
@@ -190,6 +206,9 @@ app.get('/api/deals', async (req, res) => {
     const ap = s.announce_price != null ? Number(s.announce_price) : null;
     const cp = s.current_price   != null ? Number(s.current_price)   : null;
     s.return_pct = (ap && cp) ? ((cp - ap) / ap) * 100 : null;
+    // Normalise the split spin-off returns (stored as NUMERIC → string on PG)
+    if (s.parent_return_pct != null) s.parent_return_pct = Number(s.parent_return_pct);
+    if (s.spinco_return_pct != null) s.spinco_return_pct = Number(s.spinco_return_pct);
     s.market_cap_bucket = marketCapBucket(s.market_cap_usd);
     s.deal_size_bucket  = dealSizeBucket(s.deal_value_usd);
     // Compact incentive badges for the screener row

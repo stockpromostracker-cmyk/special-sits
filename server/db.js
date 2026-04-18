@@ -165,6 +165,14 @@ async function migrate() {
     ['ipo_price',            'NUMERIC'],   // For IPOs, offering price
     ['days_to_event',        'INTEGER'],   // Cached: days from today to next key date (NULL if past)
     ['days_since_event',     'INTEGER'],   // Cached: days since completion (NULL if pending)
+    // Separate spin-off returns: parent (RemainCo) vs spinco are economically different
+    // investments post-spin. Both calculated since the ex-date baseline close.
+    ['parent_return_pct',    'NUMERIC'],   // % return on the parent ticker since ex-date
+    ['spinco_return_pct',    'NUMERIC'],   // % return on the spinco ticker since first-trade date
+    ['parent_baseline_price','NUMERIC'],   // Parent close ON ex-date (when stub started trading)
+    ['spinco_baseline_price','NUMERIC'],   // SpinCo open/first-trade price (USD)
+    ['parent_current_price', 'NUMERIC'],   // Latest parent price in USD
+    ['spinco_current_price', 'NUMERIC'],   // Latest spinco price in USD
   ];
   for (const [name, type] of newCols) {
     try {
@@ -220,6 +228,18 @@ async function migrate() {
   await query(`CREATE INDEX IF NOT EXISTS idx_deals_tier        ON deals(data_source_tier)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_deals_filing_date ON deals(filing_date)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_deals_completed   ON deals(completed_date)`);
+  // Search speed: screener 'q' filter does substring on these text columns.
+  // Plain btree doesn't help LIKE '%foo%' — Postgres needs pg_trgm+GIN, SQLite
+  // builds an in-memory scan. We add basic btree indexes which at least help
+  // equality lookups, and (on PG) a trigram index for ILIKE.
+  await query(`CREATE INDEX IF NOT EXISTS idx_deals_primary_ticker ON deals(primary_ticker)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_deals_target_ticker  ON deals(target_ticker)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_deals_spinco_ticker  ON deals(spinco_ticker)`);
+  if (USE_PG) {
+    try { await query(`CREATE EXTENSION IF NOT EXISTS pg_trgm`); } catch (_) {}
+    try { await query(`CREATE INDEX IF NOT EXISTS idx_deals_headline_trgm ON deals USING gin (headline gin_trgm_ops)`); } catch (_) {}
+    try { await query(`CREATE INDEX IF NOT EXISTS idx_deals_target_name_trgm ON deals USING gin (target_name gin_trgm_ops)`); } catch (_) {}
+  }
 
   // ---- News items: attached to a deal, never create a deal on their own ----
   // Sourced from the legacy news firehose + Gemini classifier. Each item is

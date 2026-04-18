@@ -135,22 +135,40 @@ function identityFields(eventType, company, ticker) {
 
 // ---- Public API ----------------------------------------------------------
 
+// Default lookback: 24 months for registration statements (they can sit for
+// 12-18 months before the transaction completes), 12 months for priced/closed
+// events. Pass `since` as YYYY-MM-DD to override.
 async function fetchSpinoffPipeline({ since } = {}) {
-  const startdt = since || daysAgo(400);
+  const startdt = since || daysAgo(730);  // 24 months — e.g. Amrize 10-12B was mid-2024
   const enddt = today();
   const hits = await efts(['10-12B', '10-12B/A'], { startdt, enddt });
   return hits.map(normaliseHit).map(h => makeDeal(h, 'spin_off_pending', h.form === '10-12B/A' ? 'sec_10_12b_a' : 'sec_10_12b'));
 }
 
+// Completed spin-offs: 8-K with Item 2.01 ("Completion of Acquisition or
+// Disposition of Assets") that specifically mentions "spin-off" or
+// "distribution". Narrower than fetching all 8-Ks.
+async function fetchSpinoffCompleted({ since } = {}) {
+  const startdt = since || daysAgo(730);
+  const enddt = today();
+  const hits = await efts(['8-K'], { startdt, enddt, q: '"spin-off" "Item 2.01"' });
+  return hits.map(normaliseHit).map(h => {
+    const d = makeDeal(h, 'spin_off_completed', 'sec_8k_201');
+    d.completed_date = h.file_date;
+    d.key_dates = { ...(d.key_dates || {}), completed_date: h.file_date };
+    return d;
+  });
+}
+
 async function fetchIpoPipeline({ since } = {}) {
-  const startdt = since || daysAgo(120);
+  const startdt = since || daysAgo(365);
   const enddt = today();
   const hits = await efts(['S-1', 'S-1/A', 'F-1', 'F-1/A'], { startdt, enddt });
   return hits.map(normaliseHit).map(h => makeDeal(h, 'ipo_pending', 'sec_s1'));
 }
 
 async function fetchIpoPriced({ since } = {}) {
-  const startdt = since || daysAgo(120);
+  const startdt = since || daysAgo(365);
   const enddt = today();
   // 424B4 is filed on/just after IPO pricing. Narrowest IPO signal.
   const hits = await efts(['424B4', '424B1'], { startdt, enddt });
@@ -158,7 +176,7 @@ async function fetchIpoPriced({ since } = {}) {
 }
 
 async function fetchMergerProxies({ since } = {}) {
-  const startdt = since || daysAgo(180);
+  const startdt = since || daysAgo(365);
   const enddt = today();
   const hits = await efts(['DEFM14A', 'PREM14A', 'SC 14D9'], { startdt, enddt });
   return hits.map(normaliseHit).map(h => {
@@ -171,14 +189,17 @@ async function fetchMergerProxies({ since } = {}) {
 async function fetchAll({ since } = {}) {
   const tasks = await Promise.allSettled([
     fetchSpinoffPipeline({ since }),
+    fetchSpinoffCompleted({ since }),
     fetchIpoPipeline({ since }),
     fetchIpoPriced({ since }),
     fetchMergerProxies({ since }),
   ]);
-  const results = { spinoff_pending: 0, ipo_pending: 0, ipo_priced: 0, merger_pending: 0, deals: [] };
-  const [spin, ipoP, ipoR, m] = tasks;
+  const results = { spinoff_pending: 0, spinoff_completed: 0, ipo_pending: 0, ipo_priced: 0, merger_pending: 0, deals: [] };
+  const [spin, spinC, ipoP, ipoR, m] = tasks;
   if (spin.status === 'fulfilled') { results.spinoff_pending = spin.value.length; results.deals.push(...spin.value); }
   else console.error('[sec] spinoff pipeline failed:', spin.reason?.message);
+  if (spinC.status === 'fulfilled') { results.spinoff_completed = spinC.value.length; results.deals.push(...spinC.value); }
+  else console.error('[sec] spinoff completed failed:', spinC.reason?.message);
   if (ipoP.status === 'fulfilled') { results.ipo_pending = ipoP.value.length; results.deals.push(...ipoP.value); }
   else console.error('[sec] ipo pipeline failed:', ipoP.reason?.message);
   if (ipoR.status === 'fulfilled') { results.ipo_priced = ipoR.value.length; results.deals.push(...ipoR.value); }
@@ -206,6 +227,7 @@ function daysAgo(n)  { const d = new Date(); d.setDate(d.getDate() - n); return 
 module.exports = {
   fetchAll,
   fetchSpinoffPipeline,
+  fetchSpinoffCompleted,
   fetchIpoPipeline,
   fetchIpoPriced,
   fetchMergerProxies,
