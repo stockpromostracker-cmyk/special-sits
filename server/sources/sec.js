@@ -91,7 +91,7 @@ function makeDeal({ form, file_date, accession, company, ticker, cik, filing_url
              : eventType.startsWith('merger') ? 'merger_arb'
              : 'other',
     status: eventType.endsWith('_completed') || eventType === 'ipo_recent' ? 'completed' : 'announced',
-    region: 'NA',
+    region: 'US',
     country: 'US',
     headline: eventTypeHeadline(eventType, company, ticker, form),
     summary: `Filed ${form} with the SEC on ${file_date}.`,
