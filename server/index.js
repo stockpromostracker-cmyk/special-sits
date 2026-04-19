@@ -11,6 +11,7 @@ const { marketCapBucket, dealSizeBucket, COUNTRY_TO_REGION, REGION_HIERARCHY, UI
 const { rollupAll, rollupDeal, listTransactionsForDeal } = require('./incentives');
 const { fetchAllInsider } = require('./insider_feeds');
 const { ownershipAndCompForDeal } = require('./ownership');
+const { fetchAllShort, shortInterestForDeal } = require('./sources/short_interest');
 const { runAuthoritativeCycle } = require('./authoritative_ingest');
 
 const app = express();
@@ -241,6 +242,13 @@ app.get('/api/deals', async (req, res, next) => {
   const sql = `SELECT * FROM deals ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
                ORDER BY ${orderBy} LIMIT 500`;
   const rows = await query(sql, params);
+
+  // Batch-enrich with short-interest snapshots so the screener can show a
+  // column without N+1 queries. Two lookups, both aggregated in SQL:
+  //   - usShortByTicker   : latest FINRA short_ratio per bare ticker
+  //   - euShortByIssuerKey: sum of disclosed SSR positions per normalized issuer
+  const shortMaps = await buildScreenerShortMaps(rows);
+
   res.json(rows.map(d => {
     const s = enrichEvent(serializeDeal(d));
     const ap = s.announce_price != null ? Number(s.announce_price) : null;
@@ -256,6 +264,19 @@ app.get('/api/deals', async (req, res, next) => {
     s.deal_size_bucket  = dealSizeBucket(s.deal_value_usd);
     // Compact incentive badges for the screener row
     s.incentive_badges = buildIncentiveBadges(s);
+    // Short-interest quick-look:
+    //   short_ratio_latest  (0..1)   — US FINRA latest day
+    //   short_disclosed_pct (0..100) — sum of SSR-disclosed EU/UK positions
+    const bare = (s.primary_ticker || '').toUpperCase().split(':').pop();
+    if (bare && shortMaps.us.has(bare)) {
+      const row = shortMaps.us.get(bare);
+      s.short_ratio_latest = row.short_ratio;
+      s.short_as_of_date = row.as_of_date;
+    }
+    const key = normIssuerKeyForScreener(s.issuer_name || s.target_name || s.parent_name);
+    if (key && shortMaps.eu.has(key)) {
+      s.short_disclosed_pct = shortMaps.eu.get(key);
+    }
     return s;
   }));
   } catch (e) { console.error('[deals]', e.message); res.status(500).json({ error: e.message }); }
@@ -291,6 +312,100 @@ app.get('/api/events/recent', async (req, res) => {
   );
   res.json(rows.map(d => enrichEvent(serializeDeal(d))));
 });
+
+// ---- Short-interest batch enrichment for the screener ----
+// Given the deals list, build two lookup maps in a single query each.
+async function buildScreenerShortMaps(dealRows) {
+  const tickers = Array.from(new Set(
+    dealRows.map(d => (d.primary_ticker || '').toUpperCase().split(':').pop()).filter(Boolean)
+  ));
+  const keys = Array.from(new Set(
+    dealRows.map(d => normIssuerKeyForScreener(d.issuer_name || d.target_name || d.parent_name)).filter(Boolean)
+  ));
+  const us = new Map();
+  const eu = new Map();
+
+  if (tickers.length) {
+    // Per ticker, pick the most recent as_of_date row (aggregated across facilities).
+    const placeholders = tickers.map((_, i) => `$${i + 1}`).join(',');
+    try {
+      const rows = await query(
+        `SELECT issuer_ticker, as_of_date,
+                SUM(short_volume) AS short_volume,
+                SUM(total_volume) AS total_volume
+           FROM short_positions
+          WHERE source = 'finra_regsho'
+            AND issuer_ticker IN (${placeholders})
+          GROUP BY issuer_ticker, as_of_date`,
+        tickers
+      );
+      // Fold to latest date per ticker.
+      const byT = new Map();
+      for (const r of rows) {
+        const t = r.issuer_ticker;
+        const cur = byT.get(t);
+        if (!cur || r.as_of_date > cur.as_of_date) byT.set(t, r);
+      }
+      for (const [t, r] of byT) {
+        const sv = Number(r.short_volume) || 0;
+        const tv = Number(r.total_volume) || 0;
+        if (tv > 0) us.set(t, { short_ratio: +(sv / tv).toFixed(4), as_of_date: r.as_of_date });
+      }
+    } catch (e) { console.error('[screener-short:us]', e.message); }
+  }
+
+  if (keys.length) {
+    // For each key, sum the most recent position_pct per holder. We approximate
+    // with total disclosed sum since holders rarely overlap across the current
+    // snapshot — FCA/AFM only publish "currently" active positions.
+    // Use a single LIKE fan-out: one query per key is simpler and still cheap.
+    // short_positions is currently small (<10k rows), so this is fine.
+    for (const key of keys) {
+      try {
+        const rows = await query(
+          `SELECT SUM(position_pct) AS total_pct
+             FROM (
+               SELECT DISTINCT ON (holder_name, issuer_name) holder_name, issuer_name, position_pct, as_of_date
+                 FROM short_positions
+                WHERE kind = 'disclosed_position'
+                  AND LOWER(issuer_name) LIKE $1
+                ORDER BY holder_name, issuer_name, as_of_date DESC
+             ) t`,
+          [`%${key}%`]
+        );
+        const v = Number(rows[0] && rows[0].total_pct);
+        if (v > 0) eu.set(key, +v.toFixed(2));
+      } catch (e) {
+        // DISTINCT ON is PG-only; SQLite fallback:
+        try {
+          const rows = await query(
+            `SELECT holder_name, MAX(position_pct) AS p
+               FROM short_positions
+              WHERE kind = 'disclosed_position'
+                AND LOWER(issuer_name) LIKE $1
+              GROUP BY holder_name`,
+            [`%${key}%`]
+          );
+          const total = rows.reduce((s, r) => s + (Number(r.p) || 0), 0);
+          if (total > 0) eu.set(key, +total.toFixed(2));
+        } catch (e2) { /* ignore */ }
+      }
+    }
+  }
+
+  return { us, eu };
+}
+
+// Mirror of short_interest.normIssuerKey. Duplicated to avoid a require cycle
+// at startup and so screener / sources can evolve independently.
+function normIssuerKeyForScreener(s) {
+  if (!s) return '';
+  let n = String(s).toLowerCase();
+  n = n.replace(/[.,]/g, ' ').replace(/\s+/g, ' ').trim();
+  n = n.replace(/\b(inc|corp|corporation|company|co|ltd|limited|plc|ag|sa|nv|n\.v|s\.a|se|spa|ab|asa|gmbh|llc|lp|oyj|abp|holdings|group)\b\.?/g, ' ');
+  n = n.replace(/\s+/g, ' ').trim();
+  return n.length >= 4 ? n : '';
+}
 
 // Build a small list of badge objects summarising the incentive layer. Shown
 // as the "Skin" column on the screener.
@@ -616,6 +731,20 @@ app.get('/api/deals/:id/ownership', async (req, res) => {
   }
 });
 
+// Short-interest for a single deal. Returns {us, eu} snapshot — null sides
+// are hidden client-side.
+app.get('/api/deals/:id/short-interest', async (req, res) => {
+  try {
+    const [row] = await query(`SELECT * FROM deals WHERE id = $1`, [req.params.id]);
+    if (!row) return res.status(404).json({ error: 'not found' });
+    const result = await shortInterestForDeal(row);
+    res.json(result);
+  } catch (e) {
+    console.error('[short-interest]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/deals/:id/related', async (req, res) => {
   try {
     const [self] = await query(`SELECT * FROM deals WHERE id = $1`, [req.params.id]);
@@ -736,6 +865,22 @@ app.post('/api/admin/refresh-insider', async (req, res) => {
     res.json({ ok: true, insider: feeds, rollup: roll });
   } catch (e) {
     console.error('[refresh-insider]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Refresh short-interest feeds (FINRA/AFM/FCA). Admin or ingest token.
+// ?days=N controls FINRA day window (default 3, FCA/AFM always a single snapshot).
+app.post('/api/admin/refresh-short', async (req, res) => {
+  const ingestOk = INGEST_TOKEN && req.header('x-ingest-token') === INGEST_TOKEN;
+  const adminOk  = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  if (!ingestOk && !adminOk) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const days = Math.max(1, Math.min(10, parseInt(req.query.days || '3', 10) || 3));
+    const r = await fetchAllShort({ finraDays: days });
+    res.json({ ok: true, ...r });
+  } catch (e) {
+    console.error('[refresh-short]', e);
     res.status(500).json({ error: e.message });
   }
 });

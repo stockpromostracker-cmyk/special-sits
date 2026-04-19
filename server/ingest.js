@@ -11,6 +11,7 @@ const { classify } = require('./classifier');
 const { prefilter, normalizeHeadline } = require('./prefilter');
 const { refreshDeal } = require('./market_data');
 const { fetchAllInsider } = require('./insider_feeds');
+const { fetchAllShort } = require('./sources/short_interest');
 const { rollupAll } = require('./incentives');
 
 const MAX_CLASSIFY_PER_RUN = parseInt(process.env.MAX_CLASSIFY_PER_RUN || '200', 10);
@@ -235,17 +236,26 @@ async function runCycle() {
   const insiderPromise = fetchAllInsider()
     .catch(e => { console.error('[ingest] insider feeds failed', e.message); return { fetched: 0, inserted: 0 }; });
 
+  // ---- 2b. Short-interest feeds -----------------------------------------
+  // FINRA regShoDaily (US) + AFM (NL) + FCA (UK). Also parallel.
+  const shortPromise = fetchAllShort({ finraDays: 3 })
+    .catch(e => { console.error('[ingest] short feeds failed', e.message); return { fetched: 0, inserted: 0 }; });
+
   // ---- 3. Classify pending deals -----------------------------------------
   const cls = await classifyPending();
   console.log(`[ingest] classified ${cls.classified}, promoted ${cls.promoted}, skipped_prefilter ${cls.skipped_prefilter}, skipped_dup ${cls.skipped_dup}`);
 
   // ---- 4. Await insider feeds then roll up incentives -------------------
   const insider = await insiderPromise;
+  const shortIx = await shortPromise;
   const incentives = await rollupAll({ activeOnly: true, limit: 500 })
     .catch(e => { console.error('[ingest] rollup failed', e.message); return { ok: 0, total: 0 }; });
-  console.log(`[ingest] insider fetched=${insider.fetched} inserted=${insider.inserted}; rollup ok=${incentives.ok}/${incentives.total}`);
+  console.log(`[ingest] insider fetched=${insider.fetched} inserted=${insider.inserted}; short fetched=${shortIx.fetched} inserted=${shortIx.inserted}; rollup ok=${incentives.ok}/${incentives.total}`);
 
-  return { fetched, inserted, ...cls, insider_fetched: insider.fetched, insider_inserted: insider.inserted, incentives_rolled: incentives.ok };
+  return { fetched, inserted, ...cls,
+           insider_fetched: insider.fetched, insider_inserted: insider.inserted,
+           short_fetched: shortIx.fetched, short_inserted: shortIx.inserted,
+           incentives_rolled: incentives.ok };
 }
 
 if (require.main === module) {

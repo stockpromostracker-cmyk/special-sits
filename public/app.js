@@ -138,8 +138,9 @@ async function renderScreener() {
           <th class="td-right hide-sm">Mkt cap</th>
           <th class="td-right">Return</th>
           <th class="hide-sm">Skin</th>
+          <th class="td-right hide-sm" title="US: FINRA latest short-volume ratio. EU/UK: total disclosed short positions ≥0.5% under SSR.">Short</th>
         </tr></thead>
-        <tbody id="deals-body"><tr><td colspan="9" class="loading">Loading deals…</td></tr></tbody>
+        <tbody id="deals-body"><tr><td colspan="10" class="loading">Loading deals…</td></tr></tbody>
       </table>
     </div>
     <div class="drawer-backdrop" id="drawer-backdrop"></div>
@@ -213,14 +214,14 @@ async function loadDeals() {
     renderDealsRows();
   } catch (e) {
     document.getElementById('deals-body').innerHTML =
-      `<tr><td colspan="9" class="empty">Could not load deals: ${esc(e.message)}</td></tr>`;
+      `<tr><td colspan="10" class="empty">Could not load deals: ${esc(e.message)}</td></tr>`;
   }
 }
 
 function renderDealsRows() {
   const tbody = document.getElementById('deals-body');
   if (!state.deals.length) {
-    tbody.innerHTML = `<tr><td colspan="9" class="empty">
+    tbody.innerHTML = `<tr><td colspan="10" class="empty">
       <h3>No deals match</h3>
       <div>Try clearing filters or selecting another timeframe. If the database is empty, run the authoritative ingest from the Admin page.</div>
     </td></tr>`;
@@ -240,6 +241,7 @@ function renderDealsRows() {
       <td class="td-right hide-sm mono">${fmtMcap(d.market_cap_usd)}</td>
       <td class="td-right mono">${returnCell(d)}</td>
       <td class="hide-sm">${skinCell(d)}</td>
+      <td class="td-right hide-sm mono">${shortCell(d)}</td>
     </tr>
   `).join('');
   tbody.querySelectorAll('tr').forEach(tr => {
@@ -309,11 +311,12 @@ async function openDrawer(id) {
   drawer.querySelector('.drawer-close').addEventListener('click', closeDrawer);
 
   try {
-    const [d, inc, rel, own] = await Promise.all([
+    const [d, inc, rel, own, shortIx] = await Promise.all([
       api(`/api/deals/${id}`),
       api(`/api/deals/${id}/incentives`).catch(() => null),
       api(`/api/deals/${id}/related`).catch(() => null),
       api(`/api/deals/${id}/ownership`).catch(() => null),
+      api(`/api/deals/${id}/short-interest`).catch(() => null),
     ]);
     const kd = d.key_dates && typeof d.key_dates === 'object' ? d.key_dates : {};
     drawer.innerHTML = `
@@ -435,6 +438,8 @@ async function openDrawer(id) {
         ${renderRelationshipGraph(rel, d)}
 
         ${renderOwnershipCompSection(d, own)}
+
+        ${renderShortInterestSection(d, shortIx)}
 
         <div class="section">
           <h3>Timeline</h3>
@@ -625,6 +630,115 @@ function fmtCompact(n) {
   if (abs >= 1e6) return (n/1e6).toFixed(2) + 'M';
   if (abs >= 1e3) return (n/1e3).toFixed(1) + 'K';
   return String(Math.round(n));
+}
+
+// -----------------------------------------------------------------
+// Short interest — FINRA daily volume (US) + SSR disclosures (EU/UK)
+// -----------------------------------------------------------------
+// Two complementary views:
+//   1. US (FINRA regShoDaily): short-sale volume / total volume as a ratio,
+//      plus a sparkline of the last ~20 business days. This is a FLOW
+//      metric, not a stock metric — it captures daily selling pressure,
+//      not aggregate short interest. Rising ratio = more aggressive
+//      short-sellers that day.
+//   2. EU/UK (AFM + FCA): disclosed net short positions >=0.5% by holder
+//      under the Short Selling Regulation. These ARE stock metrics and
+//      list the actual funds holding the short.
+function renderShortInterestSection(d, s) {
+  if (!s || (!s.us && !s.eu)) return '';
+  const us = s.us ? renderShortUsBlock(s.us) : '';
+  const eu = s.eu ? renderShortEuBlock(s.eu) : '';
+  const externalLinks = renderShortExternalLinks(d);
+  return `<div class="section">
+    <h3>Short interest</h3>
+    <p class="hint-text">Regulator-disclosed. US: daily short-sale volume. EU/UK: SSR positions ≥0.5%.</p>
+    ${us}
+    ${eu}
+    ${externalLinks}
+  </div>`;
+}
+
+function renderShortUsBlock(us) {
+  if (!us || !us.latest) return '';
+  const latest = us.latest;
+  const ratioPct = latest.short_ratio != null ? (latest.short_ratio * 100).toFixed(1) + '%' : '—';
+  const ratioCls = latest.short_ratio >= 0.5 ? 'tx-sell' : latest.short_ratio >= 0.3 ? '' : '';
+  // Sparkline: plot short_ratio across history, newest on the right.
+  const hist = (us.history || []).slice().reverse();
+  const spark = renderMiniSparkline(hist.map(h => (h.short_ratio || 0) * 100), { min: 0, max: 100, width: 140, height: 28 });
+  return `<h4 style="margin:4px 0 6px;font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em">US — FINRA daily short volume</h4>
+    <dl class="kv">
+      <dt>Latest short ratio</dt><dd><span class="${ratioCls}">${ratioPct}</span> <span class="mute">(${esc(latest.as_of_date || '')})</span></dd>
+      <dt>Short volume</dt><dd>${fmtCompact(latest.short_volume)} / ${fmtCompact(latest.total_volume)} total</dd>
+      <dt>Last ${hist.length} sessions</dt><dd>${spark}</dd>
+    </dl>`;
+}
+
+function renderShortEuBlock(eu) {
+  if (!eu || !eu.positions || !eu.positions.length) return '';
+  const rows = eu.positions.map(p => {
+    const flag = p.source === 'fca_short' ? '🇬🇧' : p.source === 'afm_short' ? '🇳🇱' : '';
+    return `<tr>
+      <td>${esc(p.holder)}</td>
+      <td class="td-right"><strong>${p.pct.toFixed(2)}%</strong></td>
+      <td style="color:var(--muted);font-size:12px">${esc(p.as_of_date || '—')}</td>
+      <td style="color:var(--muted);font-size:12px">${flag} ${p.source === 'fca_short' ? 'FCA' : p.source === 'afm_short' ? 'AFM' : esc(p.source)}</td>
+    </tr>`;
+  }).join('');
+  return `<h4 style="margin:12px 0 6px;font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em">EU/UK — disclosed short positions (SSR ≥0.5%)</h4>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:6px">
+      Total disclosed: <strong>${eu.total_pct.toFixed(2)}%</strong>
+      ${eu.top_holder ? ` ·  largest: ${esc(eu.top_holder.holder)} (${eu.top_holder.pct.toFixed(2)}%)` : ''}
+      ${eu.as_of_date ? ` ·  as of ${esc(eu.as_of_date)}` : ''}
+    </div>
+    <div class="insider-tx-wrap"><table class="insider-tx">
+      <thead><tr><th>Holder</th><th class="td-right">% of capital</th><th>As of</th><th>Source</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
+
+// Primary-source links for users to cross-check the numbers.
+function renderShortExternalLinks(d) {
+  const links = [];
+  if (d.country === 'US' || (d.primary_ticker && !d.primary_ticker.includes(':'))) {
+    links.push({ label: 'FINRA Short Sale Daily Volume', url: 'https://www.finra.org/finra-data/browse-catalog/short-sale-volume-data/daily-short-sale-volume' });
+  }
+  if (d.country === 'NL' || d.country === 'BE') {
+    links.push({ label: 'AFM Net Short Positions register', url: 'https://www.afm.nl/en/sector/registers/meldingenregisters/netto-shortposities-actueel' });
+  }
+  if (d.country === 'GB' || d.country === 'UK') {
+    links.push({ label: 'FCA Short-position disclosures', url: 'https://www.fca.org.uk/markets/short-selling/notification-and-disclosure-net-short-positions' });
+  }
+  if (!links.length) return '';
+  const items = links.map(l => `<li><a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)} ↗</a></li>`).join('');
+  return `<h4 style="margin:12px 0 6px;font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em">Primary sources</h4>
+    <ul class="doc-link-list">${items}</ul>`;
+}
+
+// Minimal inline-SVG sparkline — used for the short-ratio trend.
+function renderMiniSparkline(values, opts = {}) {
+  if (!values || values.length < 2) return '<span class="mute">—</span>';
+  const w = opts.width || 120;
+  const h = opts.height || 24;
+  const pad = 2;
+  const vs = values.filter(v => v != null && isFinite(v));
+  if (vs.length < 2) return '<span class="mute">—</span>';
+  const lo = opts.min != null ? opts.min : Math.min(...vs);
+  const hi = opts.max != null ? opts.max : Math.max(...vs);
+  const range = (hi - lo) || 1;
+  const n = vs.length;
+  const pts = vs.map((v, i) => {
+    const x = pad + (i * (w - pad * 2)) / (n - 1);
+    const y = h - pad - ((v - lo) / range) * (h - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const last = vs[vs.length - 1];
+  const cx = pad + ((n - 1) * (w - pad * 2)) / (n - 1);
+  const cy = h - pad - ((last - lo) / range) * (h - pad * 2);
+  return `<svg width="${w}" height="${h}" style="vertical-align:middle" aria-hidden="true">
+    <polyline fill="none" stroke="#2a8af6" stroke-width="1.5" points="${pts}"/>
+    <circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="2" fill="#2a8af6"/>
+  </svg>`;
 }
 
 function renderOfficialDocLinksInner(d) {
@@ -1298,6 +1412,23 @@ function primaryTickerCell(d) {
   }
   return `<div class="ticker-primary">${esc(primary)}</div>`;
 }
+// Short-interest cell for the screener. Prefers the richer EU disclosed-
+// position sum when available (actual stock metric), else falls back to US
+// FINRA short ratio (flow metric — less informative but cheap).
+function shortCell(d) {
+  if (d.short_disclosed_pct != null) {
+    const v = Number(d.short_disclosed_pct);
+    const cls = v >= 3 ? 'ret-neg' : v >= 1 ? '' : 'mute';
+    return `<span class="${cls}" title="Sum of SSR-disclosed net short positions (≥0.5%)">${v.toFixed(1)}% 📑</span>`;
+  }
+  if (d.short_ratio_latest != null) {
+    const pct = Number(d.short_ratio_latest) * 100;
+    const cls = pct >= 50 ? 'ret-neg' : pct >= 35 ? '' : 'mute';
+    return `<span class="${cls}" title="FINRA daily short-volume ratio (${d.short_as_of_date || ''}). Flow metric, not stock.">${pct.toFixed(0)}%</span>`;
+  }
+  return '<span style="color:var(--muted)">—</span>';
+}
+
 function skinCell(d) {
   const badges = Array.isArray(d.incentive_badges) ? d.incentive_badges : [];
   if (!badges.length) return '<span style="color:var(--muted)">—</span>';

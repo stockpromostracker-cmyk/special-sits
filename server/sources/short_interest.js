@@ -21,6 +21,7 @@
 // both SQLite and PG.
 
 const XLSX = require('xlsx');
+const { query } = require('../db');
 
 const UA = 'SpecialSits Research cfrjacobsson@gmail.com';
 const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -329,11 +330,184 @@ function excelToIsoDate(v) {
   return null;
 }
 
+// --------------------------------------------------------------------------
+// Persist
+// --------------------------------------------------------------------------
+// The UNIQUE constraint on short_positions is:
+//   (source, kind, issuer_ticker, isin, holder_name, as_of_date, reporting_facility)
+// Postgres treats NULL as distinct in UNIQUE, so upstream fetchers coerce
+// optional keys to empty string ''. We preserve that invariant here.
+async function saveShortPositions(rows) {
+  let inserted = 0;
+  for (const r of rows) {
+    try {
+      const res = await query(
+        `INSERT INTO short_positions (
+           source, kind,
+           issuer_name, issuer_country, issuer_ticker, isin,
+           holder_name, as_of_date,
+           short_volume, total_volume, short_ratio, position_pct,
+           reporting_facility
+         )
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         ON CONFLICT (source, kind, issuer_ticker, isin, holder_name, as_of_date, reporting_facility)
+           DO UPDATE SET
+             short_volume = EXCLUDED.short_volume,
+             total_volume = EXCLUDED.total_volume,
+             short_ratio  = EXCLUDED.short_ratio,
+             position_pct = EXCLUDED.position_pct,
+             issuer_name  = COALESCE(EXCLUDED.issuer_name, short_positions.issuer_name),
+             issuer_country = COALESCE(EXCLUDED.issuer_country, short_positions.issuer_country)
+         RETURNING id`,
+        [
+          r.source, r.kind,
+          r.issuer_name, r.issuer_country, r.issuer_ticker || '', r.isin || '',
+          r.holder_name || '', r.as_of_date,
+          r.short_volume, r.total_volume, r.short_ratio, r.position_pct,
+          r.reporting_facility || '',
+        ]
+      );
+      if (res.length) inserted++;
+    } catch (e) {
+      if (!/duplicate|unique/i.test(e.message)) {
+        console.error('[saveShortPositions]', e.message);
+      }
+    }
+  }
+  return inserted;
+}
+
+// Orchestrator — fetch all three feeds in parallel and persist.
+// Mirrors fetchAllInsider() pattern.
+async function fetchAllShort({ finraDays = 3 } = {}) {
+  const [us, nl, uk] = await Promise.all([
+    fetchFinraRegSho(finraDays).catch(e => (console.error('[short:finra]', e.message), [])),
+    fetchAfmShort().catch(e => (console.error('[short:afm]', e.message), [])),
+    fetchFcaShort().catch(e => (console.error('[short:fca]', e.message), [])),
+  ]);
+  const all = [...us, ...nl, ...uk];
+  const inserted = await saveShortPositions(all);
+  console.log(`[short] fetched ${all.length} (us=${us.length} nl=${nl.length} uk=${uk.length}), inserted/updated ${inserted}`);
+  return { fetched: all.length, inserted, by_source: { us: us.length, nl: nl.length, uk: uk.length } };
+}
+
+// --------------------------------------------------------------------------
+// Deal lookup helpers
+// --------------------------------------------------------------------------
+
+// Given a deal row, return a merged short-interest snapshot:
+//   {
+//     us: { latest: { as_of_date, short_ratio, short_volume, total_volume },
+//           history: [ {as_of_date, short_ratio} ... ] },
+//     eu: { positions: [ { holder, pct, as_of_date, source } ... ],
+//           total_pct, top_holder, as_of_date }
+//   }
+// Matches by primary_ticker (US, bare symbol) or by fuzzy issuer-name (EU/UK).
+// Returns {us:null, eu:null} if nothing found — caller hides the section.
+async function shortInterestForDeal(deal) {
+  const out = { us: null, eu: null };
+
+  // ---- US: FINRA by ticker ----
+  const usTicker = extractBareTicker(deal.primary_ticker);
+  if (usTicker) {
+    const rows = await query(
+      `SELECT as_of_date,
+              SUM(short_volume) AS short_volume,
+              SUM(total_volume) AS total_volume
+         FROM short_positions
+        WHERE source = 'finra_regsho'
+          AND issuer_ticker = $1
+        GROUP BY as_of_date
+        ORDER BY as_of_date DESC
+        LIMIT 30`,
+      [usTicker]
+    );
+    if (rows.length) {
+      const history = rows.map(r => ({
+        as_of_date: r.as_of_date,
+        short_volume: Number(r.short_volume) || 0,
+        total_volume: Number(r.total_volume) || 0,
+        short_ratio: r.total_volume > 0 ? +(Number(r.short_volume) / Number(r.total_volume)).toFixed(4) : null,
+      }));
+      out.us = { latest: history[0], history };
+    }
+  }
+
+  // ---- EU/UK: AFM + FCA by fuzzy issuer name ----
+  const issuer = deal.issuer_name || deal.target_name || deal.parent_name;
+  if (issuer) {
+    const key = normIssuerKey(issuer);
+    if (key && key.length >= 4) {
+      const rows = await query(
+        `SELECT holder_name, issuer_name, as_of_date, position_pct, source
+           FROM short_positions
+          WHERE kind = 'disclosed_position'
+            AND LOWER(issuer_name) LIKE $1
+          ORDER BY as_of_date DESC, position_pct DESC
+          LIMIT 25`,
+        [`%${key}%`]
+      );
+      if (rows.length) {
+        // For each holder, keep only the most recent disclosure.
+        const byHolder = new Map();
+        for (const r of rows) {
+          const k = (r.holder_name || '').toLowerCase();
+          if (!byHolder.has(k) || r.as_of_date > byHolder.get(k).as_of_date) {
+            byHolder.set(k, r);
+          }
+        }
+        const positions = Array.from(byHolder.values())
+          .map(r => ({
+            holder: r.holder_name,
+            issuer: r.issuer_name,
+            pct: Number(r.position_pct),
+            as_of_date: r.as_of_date,
+            source: r.source,
+          }))
+          .sort((a, b) => b.pct - a.pct)
+          .slice(0, 10);
+        const total_pct = +positions.reduce((s, p) => s + (p.pct || 0), 0).toFixed(2);
+        out.eu = {
+          positions,
+          total_pct,
+          top_holder: positions[0] || null,
+          as_of_date: positions.reduce((max, p) => p.as_of_date > max ? p.as_of_date : max, ''),
+        };
+      }
+    }
+  }
+
+  return out;
+}
+
+// Strip EXCHANGE: prefix. FINRA data is bare symbols.
+function extractBareTicker(t) {
+  if (!t) return null;
+  const s = String(t).trim().toUpperCase();
+  if (!s) return null;
+  const i = s.indexOf(':');
+  const bare = i >= 0 ? s.slice(i + 1) : s;
+  return /^[A-Z][A-Z0-9.\-]{0,9}$/.test(bare) ? bare : null;
+}
+
+// Mirror of ownership.js normKey — strip corporate-form suffixes so
+// "Coffee Stain NV" matches "Coffee Stain" etc.
+function normIssuerKey(s) {
+  if (!s) return '';
+  let n = String(s).toLowerCase();
+  n = n.replace(/[.,]/g, ' ').replace(/\s+/g, ' ').trim();
+  n = n.replace(/\b(inc|corp|corporation|company|co|ltd|limited|plc|ag|sa|nv|n\.v|s\.a|se|spa|ab|asa|gmbh|llc|lp|oyj|abp|holdings|group)\b\.?/g, ' ');
+  return n.replace(/\s+/g, ' ').trim();
+}
+
 module.exports = {
   fetchFinraRegSho,
   fetchFinraRegShoForDate,
   fetchAfmShort,
   fetchFcaShort,
+  saveShortPositions,
+  fetchAllShort,
+  shortInterestForDeal,
   // test helpers
   _parseFinraCsv: parseFinraCsv,
   _splitCsvLine: splitCsvLine,
