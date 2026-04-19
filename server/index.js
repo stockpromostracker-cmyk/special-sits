@@ -689,6 +689,26 @@ app.get('/api/deals/:id/incentives', async (req, res) => {
   }
 });
 
+// Public read: insider-feed summary by source + country. Useful to verify
+// ingestion and expose regional coverage to the UI.
+app.get('/api/insider/summary', async (_req, res) => {
+  try {
+    const rows = await query(
+      `SELECT source, issuer_country,
+              COUNT(*) AS tx_count,
+              COUNT(DISTINCT issuer_name) AS issuer_count,
+              MAX(transaction_date) AS latest_tx
+       FROM insider_transactions
+       WHERE transaction_date IS NOT NULL
+       GROUP BY source, issuer_country
+       ORDER BY tx_count DESC`
+    );
+    res.json({ sources: rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Refresh insider feeds + rollup (admin or ingest token). Runs in the cron too.
 app.post('/api/admin/refresh-insider', async (req, res) => {
   const ingestOk = INGEST_TOKEN && req.header('x-ingest-token') === INGEST_TOKEN;
