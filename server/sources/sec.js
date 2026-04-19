@@ -601,10 +601,19 @@ async function extractSpinParent(accession, cik, excludeName) {
       const buf = await r.arrayBuffer();
       const html = Buffer.from(buf.slice(0, 500_000)).toString('utf8');
       text = html.replace(/<[^>]+>/g, ' ')
-        .replace(/&nbsp;|&#160;|&#8203;|&#8201;/g, ' ')
+        .replace(/&nbsp;|&#160;|&#8203;|&#8201;|&#8202;|&#8199;/g, ' ')
         .replace(/&amp;/g, '&')
         .replace(/&#8220;|&#8221;|&ldquo;|&rdquo;/g, '"')
         .replace(/&#8217;|&#8216;|&rsquo;|&lsquo;/g, "'")
+        // Generic numeric-entity decode for ASCII range (handles &#58; colon,
+        // &#40;&#41; parens, &#91;&#93; brackets, etc.)
+        .replace(/&#(\d{1,4});/g, (_, code) => {
+          const n = parseInt(code, 10);
+          return n >= 32 && n <= 126 ? String.fromCharCode(n) : ' ';
+        })
+        // Common named entities
+        .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
         .replace(/\s+/g, ' ');
     } catch { continue; }
 
@@ -620,7 +629,13 @@ async function extractSpinParent(accession, cik, excludeName) {
       // "Dear [Parent] Stockholder:" / "Dear [Parent] Shareholders,"
       /\bDear\s+([A-Z][\w .&,-]{2,60}?)\s+(?:[Ss]tockholders?|[Ss]hareholders?|[Hh]olders?)\s*[,:.]/,
       // "shareholders of [PARENT] as of the record / will receive / approved / of record"
-      /\b(?:stockholders|shareholders)\s+of\s+([A-Z][\w .&,-]{2,80}?)\s+(?:as\s+of\s+the\s+record|will\s+receive|of\s+record|approved|\(|voted)/i,
+      // Allow an optional parenthetical alias between parent name and the trigger
+      // verb, e.g. "shareholders of Ashtead Group plc (Ashtead) approved".
+      // NOTE: we deliberately do NOT accept raw "(" as a terminator — that catches
+      // false-positives like "shareholders of ordinary shares of Amrize Ltd (the Company)".
+      /\b(?:stockholders|shareholders)\s+of\s+([A-Z][\w .&,-]{2,80}?)\s*(?:\([^)]{0,40}\)\s*)?\s*(?:as\s+of\s+the\s+record|will\s+receive|of\s+record|approved|voted)/i,
+      // "distribution ... by [PARENT] Ltd? (Parent)" — explicit ( Parent ) marker
+      /\bby\s+([A-Z][\w .&,-]{2,80}?)\s*\(\s*(?:["']?\s*)?(?:the\s+)?Parent\s*(?:\s*["']?)?\s*\)/,
     ];
     // Tier B (fullWindow, still strong but slightly less bulletproof):
     const tierB = [
@@ -630,7 +645,7 @@ async function extractSpinParent(accession, cik, excludeName) {
       /(?:spun|spin)[- ]?off\s+(?:from|by)\s+([A-Z][\w .&,-]{2,80}?)(?:\s+\(|\s*[.,])/,
       // "a spin-off of [SpinCo] from [PARENT]"
       /\bspin[- ]?off\s+of\s+[^.]{0,120}?\s+from\s+([A-Z][\w .&,-]{2,80}?)(?:\s+\(|\s*[.,])/,
-      // "distribution by [PARENT] of"  — must be in openWindow only (too generic otherwise)
+      // "distribution by [PARENT] of"  — fullWindow (was openWindow, same scope via tierB)
       /\bdistribution\s+by\s+([A-Z][\w .&,-]{2,80}?)\s+of\s+/,
     ];
     // Tier C (last resort, accept single-word names too):
