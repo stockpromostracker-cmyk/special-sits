@@ -100,6 +100,21 @@ async function fetchSpinoffs() {
   return out;
 }
 
+// SPAC shell detection: issuer name or symbol pattern indicates blank-check company.
+// These clog the IPO feed with ~22 "no current price" rows because Yahoo/stockanalysis
+// don't always carry SPAC warrants/units.
+function looksLikeSpac(companyName, symbol) {
+  const n = String(companyName || '').toLowerCase();
+  const s = String(symbol || '').toUpperCase();
+  if (/\bacquisition\s+(corp|company|limited|plc|inc)\b/.test(n)) return true;
+  if (/\bcapital\s+acquisition\b/.test(n)) return true;
+  if (/\bblank[-\s]?check\b/.test(n)) return true;
+  if (/\bSPAC\b/i.test(n)) return true;
+  // Common SPAC symbol patterns: ACAC, ACACU, ACACW (units/warrants)
+  if (/^[A-Z]{2,5}[UW]$/.test(s) && /\bacquisition\b/.test(n)) return true;
+  return false;
+}
+
 async function fetchIpos() {
   const html = await fetchHtml('https://stockanalysis.com/ipos/');
   const rows = parseTable(html, 5);
@@ -115,13 +130,15 @@ async function fetchIpos() {
     const daysSince = Math.round((today - ipoDt) / 86400000);
     // Only keep IPOs from the last 180d (beyond that they're not "recent")
     if (daysSince > 180 || daysSince < 0) continue;
+    const isSpac = looksLikeSpac(company, symbol);
     out.push({
       event_type: 'ipo_recent',
       data_source_tier: 'aggregator',
       primary_source: 'stockanalysis_ipo',
       source_filing_url: `https://stockanalysis.com/stocks/${String(symbol).toLowerCase()}/`,
       confidence: 0.7,
-      deal_type: 'ipo',
+      deal_type: isSpac ? 'spac' : 'ipo',
+      is_spac: isSpac || undefined,
       status: 'completed',
       region: 'US',
       country: 'US',

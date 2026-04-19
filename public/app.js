@@ -121,6 +121,7 @@ async function renderScreener() {
       <select id="f-mcap"><option value="">Any market cap</option>${MCAP_BUCKETS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select>
       <select id="f-dsize"><option value="">Any deal size</option>${DEAL_SIZE_BUCKETS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select>
       <select id="f-insider"><option value="">Any insider signal</option>${INSIDER_SIGNALS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select>
+      <label class="filter-check" title="By default, SPAC shells are hidden (they clog the IPO feed with no-price rows)"><input id="f-spacs" type="checkbox" /> Show SPACs</label>
       <span class="spacer"></span>
       <button class="btn-ghost btn" id="f-reset">Reset</button>
     </div>
@@ -145,11 +146,13 @@ async function renderScreener() {
   `;
 
   document.getElementById('f-q').addEventListener('input', debounce(applyFilters, 250));
+  document.getElementById('f-spacs').addEventListener('change', applyFilters);
   ['f-type','f-status','f-region','f-country','f-mcap','f-dsize','f-insider','f-event','f-tier'].forEach(id =>
     document.getElementById(id).addEventListener('change', applyFilters));
   document.getElementById('f-reset').addEventListener('click', () => {
     ['f-q','f-type','f-status','f-region','f-country','f-mcap','f-dsize','f-insider','f-event','f-tier']
       .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+    document.getElementById('f-spacs').checked = false;
     state.filters.timeframe = '';
     document.querySelectorAll('.tf-tab').forEach(b => b.classList.toggle('active', b.dataset.tf === ''));
     applyFilters();
@@ -290,6 +293,7 @@ function applyFilters() {
     event_type: document.getElementById('f-event').value,
     data_source_tier: document.getElementById('f-tier').value,
     timeframe: state.filters.timeframe || '',
+    include_spacs: document.getElementById('f-spacs').checked ? '1' : '',
   };
   loadDeals();
 }

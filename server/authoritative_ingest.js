@@ -98,6 +98,8 @@ async function upsertDeal(d) {
     consideration_stock_ratio: d.consideration_stock_ratio ?? null,
     acquirer_proxy_ticker: d.acquirer_proxy_ticker || null,
     announce_date_source: d.announce_date_source || null,
+    is_spac: d.is_spac ? 1 : 0,
+    deal_value_usd: d.deal_value_usd ?? null,
   };
 
   if (existing.length) {

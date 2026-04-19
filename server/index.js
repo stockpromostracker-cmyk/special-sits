@@ -148,10 +148,16 @@ const DEAL_BUCKETS = {
 app.get('/api/deals', async (req, res, next) => {
   try {
   const { type, status, region, q, country, market_cap_bucket, deal_size_bucket,
-          insider_signal, event_type, data_source_tier, timeframe } = req.query;
+          insider_signal, event_type, data_source_tier, timeframe,
+          include_spacs } = req.query;
   const where = [];
   const params = [];
   if (type)   { params.push(type);   where.push(`deal_type = $${params.length}`); }
+  // Hide SPAC shells by default (they dominate the IPO feed with no-price rows).
+  // Opt-in with ?include_spacs=1 to see them.
+  if (!include_spacs || include_spacs === '0' || include_spacs === 'false') {
+    where.push(`(is_spac IS NULL OR is_spac = 0) AND deal_type != 'spac'`);
+  }
   if (status) { params.push(status); where.push(`status = $${params.length}`); }
   // Nested region filter: selecting 'Europe' expands to UK/Nordic/Switzerland/EU-Continental/Europe.
   if (region) {
@@ -403,6 +409,101 @@ app.post('/api/admin/run-reconcile', async (req, res) => {
     res.json({ ok: true, dryRun, ...result });
   } catch (e) {
     console.error('[reconcile]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// One-shot backfill: flag existing IPO deals as SPACs by name/symbol pattern.
+// Run once after deploy. Idempotent.
+app.post('/api/admin/backfill-spacs', async (req, res) => {
+  const ingestOk = INGEST_TOKEN && req.header('x-ingest-token') === INGEST_TOKEN;
+  const adminOk  = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  if (!ingestOk && !adminOk) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const rows = await query(
+      `SELECT id, headline, target_name, target_ticker, primary_ticker
+         FROM deals
+        WHERE deal_type IN ('ipo','spac') AND (is_spac IS NULL OR is_spac = 0)`
+    );
+    const nameRe = /\bacquisition\s+(corp|company|limited|plc|inc)\b|\bcapital\s+acquisition\b|\bblank[-\s]?check\b|\bSPAC\b/i;
+    let flagged = 0;
+    for (const r of rows) {
+      const blob = `${r.headline || ''} ${r.target_name || ''}`;
+      if (nameRe.test(blob)) {
+        await query(`UPDATE deals SET is_spac = 1, deal_type = 'spac' WHERE id = $1`, [r.id]);
+        flagged++;
+      }
+    }
+    res.json({ ok: true, scanned: rows.length, flagged });
+  } catch (e) {
+    console.error('[backfill-spacs]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// One-shot backfill: re-run SEC merger enrichment on existing merger_arb deals
+// to populate offer_price / expected_close / deal_value_usd / acquirer_name.
+app.post('/api/admin/backfill-merger-terms', async (req, res) => {
+  const ingestOk = INGEST_TOKEN && req.header('x-ingest-token') === INGEST_TOKEN;
+  const adminOk  = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  if (!ingestOk && !adminOk) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const dryRun = req.query.dry === '1';
+    const limit = Math.min(parseInt(req.query.limit || '150', 10), 500);
+    const { extractOfferTerms } = require('./sources/sec');
+    // Deals missing at least one key merger-arb field.
+    const rows = await query(
+      `SELECT id, source_filing_url, source_cik, offer_price, expected_close_date,
+              deal_value_usd, acquirer_name, consideration_type
+         FROM deals
+        WHERE deal_type = 'merger_arb'
+          AND primary_source IN ('sec_defm14a', 'sec_prem14a', 'sec_s4', 'sec_defs14a')
+          AND source_filing_url IS NOT NULL
+          AND source_cik IS NOT NULL
+          AND (offer_price IS NULL OR expected_close_date IS NULL OR deal_value_usd IS NULL OR acquirer_name IS NULL)
+        ORDER BY filing_date DESC
+        LIMIT $1`, [limit]
+    );
+    let updated = 0, scanned = 0, errors = 0;
+    const samples = [];
+    // Extract accession from source_filing_url.
+    // Format: https://www.sec.gov/Archives/edgar/data/<cik>/<accession-no-dashes>/<doc>
+    const accRe = /\/Archives\/edgar\/data\/\d+\/(\d{18})\//;
+    for (const r of rows) {
+      scanned++;
+      const m = String(r.source_filing_url).match(accRe);
+      if (!m) continue;
+      // Reconstruct dashed accession: 18 digits → 10-2-6.
+      const raw = m[1];
+      const dashed = `${raw.slice(0, 10)}-${raw.slice(10, 12)}-${raw.slice(12)}`;
+      try {
+        const terms = await extractOfferTerms(dashed, r.source_cik);
+        if (!terms) continue;
+        const sets = [];
+        const vals = [];
+        if (!r.offer_price && terms.offer_price != null) { sets.push(`offer_price = $${sets.length + 1}`); vals.push(terms.offer_price); }
+        if (!r.expected_close_date && terms.expected_close_date) { sets.push(`expected_close_date = $${sets.length + 1}`); vals.push(terms.expected_close_date); }
+        if (!r.deal_value_usd && terms.deal_value_usd) { sets.push(`deal_value_usd = $${sets.length + 1}`); vals.push(terms.deal_value_usd); }
+        if (!r.acquirer_name && terms.acquirer_name) { sets.push(`acquirer_name = $${sets.length + 1}`); vals.push(terms.acquirer_name); }
+        if (!r.consideration_type && terms.consideration_type) {
+          sets.push(`consideration_type = $${sets.length + 1}`); vals.push(terms.consideration_type);
+          if (terms.consideration_cash != null) { sets.push(`consideration_cash = $${sets.length + 1}`); vals.push(terms.consideration_cash); }
+          if (terms.consideration_stock_ratio != null) { sets.push(`consideration_stock_ratio = $${sets.length + 1}`); vals.push(terms.consideration_stock_ratio); }
+        }
+        if (!sets.length) continue;
+        if (samples.length < 5) samples.push({ id: r.id, ...terms });
+        if (!dryRun) {
+          vals.push(r.id);
+          await query(`UPDATE deals SET ${sets.join(', ')} WHERE id = $${vals.length}`, vals);
+        }
+        updated++;
+      } catch (e) {
+        errors++;
+      }
+    }
+    res.json({ ok: true, dryRun, scanned, updated, errors, samples });
+  } catch (e) {
+    console.error('[backfill-merger-terms]', e);
     res.status(500).json({ error: e.message });
   }
 });

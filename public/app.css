@@ -51,6 +51,9 @@ main { padding: 20px 28px 60px; max-width: 1600px; margin: 0 auto; }
 .filters input { min-width: 240px; }
 .filters input:focus, .filters select:focus { outline: none; border-color: var(--accent); }
 .filters .spacer { flex: 1; }
+.filter-check { display: inline-flex; align-items: center; gap: 6px; color: var(--muted);
+  font-size: 13px; padding: 0 6px; cursor: pointer; user-select: none; }
+.filter-check input { margin: 0; }
 .btn { background: var(--accent); color: #052e1e; border: none; padding: 7px 14px; border-radius: 6px;
   font-weight: 600; font-size: 13px; cursor: pointer; }
 .btn:hover { background: #2fc084; }

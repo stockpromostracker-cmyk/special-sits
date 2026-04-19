@@ -351,15 +351,75 @@ async function extractOfferTerms(accession, cik) {
   if (offerCash && stockRatio) type = 'mixed';
   else if (offerCash) type = 'cash';
   else if (stockRatio) type = 'stock';
-  if (type === 'unknown') return null;
+
+  // --- Expected close date -------------------------------------------
+  // "expected to close in the [first/second/third/fourth] quarter of 2025"
+  // "expected to be completed in [Q1/Q2/Q3/Q4] 2025"
+  // "targeted to close by [month] [day], [year]" / "on or about [date]"
+  let expectedClose = null;
+  const qMap = { first: '03-31', second: '06-30', third: '09-30', fourth: '12-31',
+                 q1: '03-31', q2: '06-30', q3: '09-30', q4: '12-31' };
+  const quarterYear = window.match(/expected\s+to\s+(?:close|be\s+completed|be\s+consummated)[^.]{0,120}?(?:in\s+the\s+)?(first|second|third|fourth|Q1|Q2|Q3|Q4)\s+(?:fiscal\s+)?quarter\s+of\s+(20\d{2})/i)
+                     || window.match(/(?:close|be\s+completed|be\s+consummated)[^.]{0,80}?(Q1|Q2|Q3|Q4)\s+(20\d{2})/i);
+  if (quarterYear) {
+    const q = qMap[quarterYear[1].toLowerCase()];
+    if (q) expectedClose = `${quarterYear[2]}-${q}`;
+  }
+  if (!expectedClose) {
+    // "targeted to close on or about March 31, 2025"
+    const monthDay = window.match(/(?:expected|targeted|anticipated|projected)\s+to\s+(?:close|be\s+completed|be\s+consummated)[^.]{0,80}?(?:on\s+or\s+about\s+)?((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+20\d{2})/i);
+    if (monthDay) {
+      const dt = new Date(monthDay[1]);
+      if (!isNaN(dt)) expectedClose = dt.toISOString().slice(0, 10);
+    }
+  }
+  if (!expectedClose) {
+    // "second half of 2025" → 2025-12-31 (end of period)
+    const half = window.match(/expected\s+to\s+(?:close|be\s+completed)[^.]{0,80}?(first|second)\s+half\s+of\s+(20\d{2})/i);
+    if (half) expectedClose = half[1].toLowerCase() === 'first' ? `${half[2]}-06-30` : `${half[2]}-12-31`;
+  }
+
+  // --- Deal value (aggregate transaction size) -----------------------
+  // "transaction is valued at approximately $4.5 billion"
+  // "total equity value of approximately $3.2 billion"
+  // "aggregate consideration of approximately $1.8 billion"
+  // "enterprise value of approximately $2.1 billion"
+  let dealValueUsd = null;
+  const dvPatterns = [
+    /(?:transaction|deal|merger)\s+(?:is\s+)?valued\s+at\s+approximately\s+\$(\d+(?:\.\d+)?)\s+(billion|million)/i,
+    /(?:total|aggregate)\s+(?:equity|consideration|transaction|purchase)\s+(?:value|price|consideration)\s+of\s+(?:approximately\s+)?\$(\d+(?:\.\d+)?)\s+(billion|million)/i,
+    /enterprise\s+value\s+of\s+(?:approximately\s+)?\$(\d+(?:\.\d+)?)\s+(billion|million)/i,
+    /all-cash\s+transaction\s+(?:valued|worth)\s+at\s+approximately\s+\$(\d+(?:\.\d+)?)\s+(billion|million)/i,
+  ];
+  for (const p of dvPatterns) {
+    const m = window.match(p);
+    if (m) {
+      const v = parseFloat(m[1]);
+      const mul = /billion/i.test(m[2]) ? 1e9 : 1e6;
+      if (isFinite(v) && v > 0 && v < 10000) { dealValueUsd = v * mul; break; }
+    }
+  }
+
+  // --- Acquirer name ------------------------------------------------
+  // "MERGER AGREEMENT BY AND AMONG ... [AcquirerCo], Inc., ... [Target], Inc."
+  // or "will be acquired by [AcquirerCo]"
+  // Very naive — only capture when a clear pattern exists.
+  let acquirerName = null;
+  const acqMatch = window.match(/will\s+be\s+acquired\s+by\s+([A-Z][\w,.\s&-]{2,80}?)(?:\s+\(|\s+in\s+a|\s+for\s+approximately|\s+for\s+\$|\.)/);
+  if (acqMatch) acquirerName = acqMatch[1].trim().replace(/\s+/g, ' ').replace(/,$/, '');
+
+  if (type === 'unknown' && !expectedClose && !dealValueUsd && !acquirerName) return null;
 
   return {
-    consideration_type: type,
+    consideration_type: type === 'unknown' ? null : type,
     consideration_cash: offerCash,
     consideration_stock_ratio: stockRatio,
     // For pure-cash deals we can set offer_price directly. Mixed/stock need
     // an acquirer reference price which we'll resolve in market_data.js.
     offer_price: type === 'cash' ? offerCash : null,
+    expected_close_date: expectedClose,
+    deal_value_usd: dealValueUsd,
+    acquirer_name: acquirerName,
   };
 }
 
@@ -379,14 +439,20 @@ async function enrichMergerDeal(d) {
     d.key_dates = { ...(d.key_dates || {}), announce_date: announce.date, filing_date: prem };
   }
   if (terms) {
-    d.consideration_type = terms.consideration_type;
-    d.consideration_cash = terms.consideration_cash;
-    d.consideration_stock_ratio = terms.consideration_stock_ratio;
+    if (terms.consideration_type) d.consideration_type = terms.consideration_type;
+    if (terms.consideration_cash != null) d.consideration_cash = terms.consideration_cash;
+    if (terms.consideration_stock_ratio != null) d.consideration_stock_ratio = terms.consideration_stock_ratio;
     if (terms.offer_price != null) d.offer_price = terms.offer_price;
+    if (terms.expected_close_date) {
+      d.expected_close_date = terms.expected_close_date;
+      d.key_dates = { ...(d.key_dates || {}), expected_close_date: terms.expected_close_date };
+    }
+    if (terms.deal_value_usd) d.deal_value_usd = terms.deal_value_usd;
+    if (terms.acquirer_name && !d.acquirer_name) d.acquirer_name = terms.acquirer_name;
     // Human-readable consideration string for the drawer
-    if (terms.consideration_type === 'cash') d.consideration = `$${terms.consideration_cash.toFixed(2)} cash per share`;
-    else if (terms.consideration_type === 'stock') d.consideration = `${terms.consideration_stock_ratio} shares per share`;
-    else if (terms.consideration_type === 'mixed') d.consideration = `$${terms.consideration_cash.toFixed(2)} cash + ${terms.consideration_stock_ratio} shares per share`;
+    if (terms.consideration_type === 'cash' && terms.consideration_cash) d.consideration = `$${terms.consideration_cash.toFixed(2)} cash per share`;
+    else if (terms.consideration_type === 'stock' && terms.consideration_stock_ratio) d.consideration = `${terms.consideration_stock_ratio} shares per share`;
+    else if (terms.consideration_type === 'mixed' && terms.consideration_cash && terms.consideration_stock_ratio) d.consideration = `$${terms.consideration_cash.toFixed(2)} cash + ${terms.consideration_stock_ratio} shares per share`;
   }
 }
 
@@ -452,4 +518,6 @@ module.exports = {
   fetchIpoPriced,
   fetchMergerProxies,
   parseDisplayName,   // exported for tests
+  extractOfferTerms,  // exported for backfill admin endpoint
+  enrichMergerDeal,
 };

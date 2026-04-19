@@ -181,6 +181,7 @@ async function migrate() {
     ['consideration_stock_ratio', 'NUMERIC'], // Per-share stock exchange ratio (target shares per acquirer share)
     ['acquirer_proxy_ticker','TEXT'],      // If stock deal, acquirer ticker used to value stock component
     ['announce_date_source', 'TEXT'],      // 'sec_8k_101' | 'sec_defa14a' | 'sec_prem14a' | 'filing_date' — how we derived announce_date
+    ['is_spac',              'INTEGER'],   // 0/1 — SPAC / blank-check shell (hidden by default from IPO feed)
   ];
   for (const [name, type] of newCols) {
     try {
