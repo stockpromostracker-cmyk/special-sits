@@ -534,14 +534,26 @@ app.post('/api/admin/refresh-deal/:id', async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     if (!id) return res.status(400).json({ error: 'bad id' });
-    const { refreshDeal, refreshFx } = require('./market_data');
+    const { refreshDeal, refreshFx, fetchQuote } = require('./market_data');
     const rows = await query(`SELECT * FROM deals WHERE id = $1`, [id]);
     if (!rows.length) return res.status(404).json({ error: 'not found' });
     await refreshFx();
+    // Debug: also run raw fetchQuote on BOTH parent and spinco tickers so we
+    // can see exactly what Yahoo returns for each \u2014 helps diagnose cases
+    // where refreshDeal succeeds but leaves fields null.
+    const { parseTicker } = require('./tickers');
+    const probe = {};
+    if (rows[0].parent_ticker) {
+      const p = parseTicker(rows[0].parent_ticker);
+      probe.parent = { ticker: rows[0].parent_ticker, yahoo: p?.yahooSymbol, quote: p ? await fetchQuote(p.yahooSymbol) : null };
+    }
+    if (rows[0].spinco_ticker) {
+      const p = parseTicker(rows[0].spinco_ticker);
+      probe.spinco = { ticker: rows[0].spinco_ticker, yahoo: p?.yahooSymbol, quote: p ? await fetchQuote(p.yahooSymbol) : null };
+    }
     const result = await refreshDeal(rows[0]);
-    // Return updated row for inspection.
     const after = await query(`SELECT id, primary_ticker, yahoo_symbol, currency, current_price, announce_price, parent_current_price, spinco_current_price, parent_return_pct, spinco_return_pct, offer_price, spread_to_deal_pct FROM deals WHERE id = $1`, [id]);
-    res.json({ ok: true, result, after: after[0] });
+    res.json({ ok: true, result, after: after[0], probe });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
