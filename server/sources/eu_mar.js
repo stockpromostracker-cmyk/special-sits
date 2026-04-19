@@ -64,7 +64,14 @@ function utf16leToString(buf) {
     copy.set(slice);
     u16 = new Uint16Array(copy.buffer, 0, Math.floor(copy.byteLength / 2));
   }
-  return String.fromCharCode.apply(null, Array.from(u16));
+  // Chunk to avoid call-stack limit on large files (~10k char batches).
+  const CHUNK = 8192;
+  let out = '';
+  for (let i = 0; i < u16.length; i += CHUNK) {
+    const end = Math.min(i + CHUNK, u16.length);
+    out += String.fromCharCode.apply(null, Array.from(u16.subarray(i, end)));
+  }
+  return out;
 }
 
 // ISO-date normalizer. `fmt` hint is 'dmy' (DD/MM/YYYY — FI) or 'mdy'
