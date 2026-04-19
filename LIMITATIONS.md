@@ -6,6 +6,23 @@ any individual deal / metric.
 
 Last updated: 2026-04-19
 
+## Recent cleanup (Apr 2026)
+
+- **Dedupe pass** removed 116 duplicate rows (multiple regulatory filings of the
+  same deal, e.g. 10-12B/A filed at successive amendments) via the cleanup-deals
+  admin endpoint. Deal count went 498 → 382. Going forward, repeated 10-12B/A
+  amendments should be captured as version-history on a single deal rather than
+  spawned as new rows — **not yet implemented in the ingest pipeline**.
+- **Status auto-fix**: rows with a past `completed_date` but `status='announced'`
+  are now promoted to `completed` + `event_type` bumped to `*_completed`.
+- **Spin-off parent coverage**: 13% → 80% via deep backfill that hits Form 10 /
+  10-12B / DEF 14A filings for the SpinCo's CIK and runs the extractor on each.
+- **9 spin-offs still have no parent_name**. Root cause: these rows are actually
+  the **parent company's own 8-K** (e.g. Aptiv's 8-K announcing it will spin off
+  Versigent). They shouldn't have a parent — they ARE the parent. The spinco-side
+  record (e.g. Versigent → Aptiv) is separate and correctly tagged. These 9 rows
+  could either be deleted, re-tagged as `announcement`, or left for manual review.
+
 ---
 
 ## 1. Geographic coverage
