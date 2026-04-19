@@ -359,20 +359,26 @@ async function openDrawer(id) {
 
               if (isSpin && (d.parent_return_pct != null || d.spinco_return_pct != null)) {
                 const pr = d.parent_return_pct, sr = d.spinco_return_pct;
-                // Sanity threshold: for completed spin-offs, a parent/spinco return > 200%
-                // usually means the baseline price is stale or mismatched (e.g. pre-split
-                // parent price used as baseline against post-split current price), not a
-                // real 5x rally. Show a warning rather than a misleading number.
-                const SUSPECT_THRESHOLD = 200; // percent
-                const suspect = (v) => v != null && Math.abs(Number(v)) > SUSPECT_THRESHOLD;
-                const pLabel = `Parent return <span class="kv-hint" title="RemainCo performance since ex-date">ⓘ</span>`;
-                const sLabel = `SpinCo return <span class="kv-hint" title="New entity performance since first trade">ⓘ</span>`;
+                // Compute duration annotation: how long has the return been accruing?
+                // Prefer ex_date when available; fall back to announce_date.
+                const anchor = d.ex_date || d.announce_date;
+                const anchorLabel = d.ex_date ? 'ex-date' : 'announce';
+                const durSuffix = (() => {
+                  if (!anchor) return '';
+                  const ms = Date.now() - new Date(anchor).getTime();
+                  if (!isFinite(ms) || ms < 0) return '';
+                  const days = ms / 86400000;
+                  let human;
+                  if (days < 45)       human = `${Math.round(days)}d`;
+                  else if (days < 365) human = `${Math.round(days/30)}mo`;
+                  else                 human = `${(days/365).toFixed(1)}y`;
+                  return ` <span class="mute" title="Since ${anchorLabel} (${anchor})">· ${human}</span>`;
+                })();
+                const pLabel = `Parent return <span class="kv-hint" title="RemainCo performance since ex-date (or announce date if ex-date unknown)">ⓘ</span>`;
+                const sLabel = `SpinCo return <span class="kv-hint" title="New entity performance since first trade (or announce date if ex-date unknown)">ⓘ</span>`;
                 const renderRet = (v) => {
                   if (v == null) return null;
-                  if (suspect(v)) {
-                    return `<span class="kv-hint" title="Computed return (${fmtReturn(v)}) exceeds sanity threshold — baseline price likely pre-split or stale. Treat as unreliable." style="color:var(--muted);text-decoration:underline dotted">baseline suspect</span>`;
-                  }
-                  return `<span class="${returnClass(v)}">${fmtReturn(v)}</span>`;
+                  return `<span class="${returnClass(v)}">${fmtReturn(v)}</span>${durSuffix}`;
                 };
                 return rawRow(pLabel, renderRet(pr))
                      + rawRow(sLabel, renderRet(sr));
@@ -386,12 +392,18 @@ async function openDrawer(id) {
               const ap = d.announce_price, cp = d.current_price;
               if (ap == null || cp == null) return '';
               const r = ((cp-ap)/ap)*100;
-              // Same sanity guard for generic return-since-announce (e.g. spin-off parent
-              // whose baseline was captured pre-split).
-              if (Math.abs(r) > 200) {
-                return rawRow('Return since announce', `<span class="kv-hint" title="Computed return (${fmtReturn(r)}) exceeds sanity threshold — baseline price likely stale or pre-split. Treat as unreliable." style="color:var(--muted);text-decoration:underline dotted">baseline suspect</span>`);
+              // Add duration annotation so large returns are understood as time-passage.
+              let durHtml = '';
+              if (d.announce_date) {
+                const days = (Date.now() - new Date(d.announce_date).getTime()) / 86400000;
+                if (isFinite(days) && days >= 0) {
+                  const human = days < 45 ? `${Math.round(days)}d`
+                              : days < 365 ? `${Math.round(days/30)}mo`
+                              : `${(days/365).toFixed(1)}y`;
+                  durHtml = ` <span class="mute" title="Since announce (${d.announce_date})">· ${human}</span>`;
+                }
               }
-              return rawRow('Return since announce', `<span class="${returnClass(r)}">${fmtReturn(r)}</span>`);
+              return rawRow('Return since announce', `<span class="${returnClass(r)}">${fmtReturn(r)}</span>${durHtml}`);
             })()}
             ${row('Refreshed', d.market_refreshed_at ? String(d.market_refreshed_at).slice(0,16) : null)}
           </dl>
@@ -401,7 +413,46 @@ async function openDrawer(id) {
 
         ${(() => {
           const isMerger = (d.deal_type === 'merger_arb') || (d.event_type && d.event_type.startsWith('merger'));
+          const isSpin   = (d.deal_type === 'spin_off') || (d.event_type && d.event_type.startsWith('spin'));
+          const isIpo    = (d.deal_type === 'ipo') || (d.deal_type === 'spac') || (d.event_type && (d.event_type.startsWith('ipo') || d.event_type.startsWith('spac')));
+
+          // ---- Spin-off details — purely informational; no offer/spread concept applies ----
+          if (isSpin) {
+            const rows = [
+              row('Parent', nameTicker(d.parent_name, d.parent_ticker)),
+              row('SpinCo', nameTicker(d.spinco_name, d.spinco_ticker)),
+              row('Distribution ratio', d.distribution_ratio),
+              row('Record date', d.record_date),
+              row('Ex-date', d.ex_date),
+              row('Distribution date', d.distribution_date),
+              row('Announce date', d.announce_date),
+              row('Status', d.status),
+            ].filter(Boolean).join('');
+            // Only render the section if there is something substantive beyond parent/spinco
+            // (which are also shown in Parties). If all extra fields are null, drop the section entirely.
+            const hasExtra = d.distribution_ratio || d.record_date || d.ex_date || d.distribution_date;
+            if (!hasExtra && !d.announce_date) return '';
+            return `<div class="section"><h3>Spin-off details</h3><dl class="kv">${rows}</dl></div>`;
+          }
+
+          // ---- IPO details — show listing fields if known ----
+          if (isIpo) {
+            const rows = [
+              row('Announce date', d.announce_date),
+              row('Expected listing', d.expected_close_date),
+              row('Offer price', d.offer_price != null ? `$${Number(d.offer_price).toFixed(2)}` : null),
+              row('Deal value (USD)', d.deal_value_usd ? fmtM(d.deal_value_usd) + 'M' : null),
+              row('Status', d.status),
+            ].filter(Boolean).join('');
+            if (!rows) return '';
+            return `<div class="section"><h3>Listing details</h3><dl class="kv">${rows}</dl></div>`;
+          }
+
+          // ---- Generic deal terms for non-merger, non-spin, non-IPO deals ----
           if (!isMerger) {
+            // Only show the section if at least one field is populated — hide empty boxes.
+            const hasAny = d.consideration || d.offer_price != null || d.deal_value_usd || d.spread_pct != null;
+            if (!hasAny) return '';
             return `<div class="section"><h3>Deal terms</h3><dl class="kv">
               ${row('Consideration', d.consideration)}
               ${row('Offer price', d.offer_price != null ? `$${Number(d.offer_price).toFixed(2)}` : null)}
@@ -1529,16 +1580,12 @@ function returnCell(d) {
   if (isSpin) {
     const pr = d.parent_return_pct, sr = d.spinco_return_pct;
     if (pr != null || sr != null) {
-      // Flag suspect baseline (>200% return typically = stale / pre-split baseline).
-      const renderLeg = (v, leg, tooltip) => {
-        if (v == null) return `<span class="mute">${leg} —</span>`;
-        if (Math.abs(Number(v)) > 200) {
-          return `<span class="mute" title="${leg} return ${fmtReturn(v)} — baseline price looks stale/pre-split, treat as unreliable">${leg} ?</span>`;
-        }
-        return `<span class="${returnClass(v)}" title="${tooltip}">${leg} ${fmtReturn(v)}</span>`;
-      };
-      const p = renderLeg(pr, 'P', 'Parent (RemainCo) since ex-date');
-      const s = renderLeg(sr, 'S', 'SpinCo since first trade');
+      const p = pr != null
+        ? `<span class="${returnClass(pr)}" title="Parent (RemainCo) since ex-date">P ${fmtReturn(pr)}</span>`
+        : '<span class="mute">P —</span>';
+      const s = sr != null
+        ? `<span class="${returnClass(sr)}" title="SpinCo since first trade">S ${fmtReturn(sr)}</span>`
+        : '<span class="mute">S —</span>';
       return `${p} <span class="mute">/</span> ${s}`;
     }
   }
