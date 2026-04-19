@@ -525,8 +525,46 @@ function daysAgo(n)  { const d = new Date(); d.setDate(d.getDate() - n); return 
 //   "stockholders of <PARENT> will receive"
 //
 // Returns { parent_name, parent_ticker } or null.
-async function extractSpinParent(accession, cik) {
+// Extract the PARENT company (the distributing entity) from a spin-off filing.
+// The filer here is the SpinCo, so any match equal to the filer name is invalid.
+// excludeName: the known SpinCo name (pass filer/spinco/target_name). Any match
+// that equals or is a substring match of this name is rejected as a false positive.
+async function extractSpinParent(accession, cik, excludeName) {
   if (!accession || !cik) return null;
+
+  // Normalise the SpinCo name so we can reject it as a "parent" candidate.
+  const normKey = (s) => String(s || '')
+    .toLowerCase()
+    .replace(/[,.]/g, ' ')
+    .replace(/\b(inc|corp|corporation|company|co|ltd|limited|plc|ag|sa|nv|se|spa|ab|asa|gmbh|llc|lp|holdings?|group|industries|the)\b/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+  const excludeKey = normKey(excludeName);
+  const excludeWords = new Set(excludeKey.split(/\s+/).filter(Boolean));
+  // True if `candidate` and the SpinCo name refer to the same entity.
+  // Uses word-overlap Jaccard, not substring — parent "FedEx" must NOT match
+  // SpinCo "FedEx Freight" even though one contains the other.
+  const isSelfRef = (candidate) => {
+    if (!excludeKey || !excludeWords.size) return false;
+    const c = normKey(candidate);
+    if (!c) return false;
+    if (c === excludeKey) return true;
+    const cWords = new Set(c.split(/\s+/).filter(Boolean));
+    if (!cWords.size) return false;
+    // Count shared distinctive words (ignore very short tokens)
+    let shared = 0, cSig = 0, eSig = 0;
+    for (const w of cWords) if (w.length >= 3) { cSig++; if (excludeWords.has(w)) shared++; }
+    for (const w of excludeWords) if (w.length >= 3) eSig++;
+    if (!cSig || !eSig) return false;
+    // Reject only if BOTH sides are largely the same: candidate is >=80% shared AND
+    // candidate uses all (or nearly all) of SpinCo's distinctive words.
+    const candShare = shared / cSig;
+    const excShare  = shared / eSig;
+    // Classic example: candidate="FedEx" vs SpinCo="FedEx Freight"
+    //   shared=1, cSig=1, eSig=2 → candShare=1.0, excShare=0.5 → NOT self
+    // SpinCo="FedEx Freight Holding Company" vs candidate="FedEx Freight"
+    //   shared=2, cSig=2, eSig=2 (after dropping corp-suffix words) → both 1.0 → self
+    return candShare >= 0.9 && excShare >= 0.6;
+  };
   const raw = String(accession).replace(/-/g, '');
   const cikPlain = String(cik).replace(/^0+/, '') || '0';
   const indexJson = `https://www.sec.gov/Archives/edgar/data/${cikPlain}/${raw}/index.json`;
@@ -570,50 +608,83 @@ async function extractSpinParent(accession, cik) {
         .replace(/\s+/g, ' ');
     } catch { continue; }
 
-    const window = text.slice(0, 60_000);
+    // High-confidence scan: only the first ~8KB (cover letter / opening summary).
+    // Parent is essentially always named here; searching deeper invites
+    // false positives from boilerplate, competitor lists, or subsidiary chains.
+    const openWindow = text.slice(0, 8000);
+    const fullWindow = text.slice(0, 60_000);
     // Patterns ordered strongest → weakest. First match wins.
-    // Each captures the parent company name.
-    const patterns = [
-      // "Dear [Parent] Shareholders," — cover-letter opener in EX-99.1
-      /\bDear\s+([A-Z][\w .&,-]{2,60}?)\s+[Ss]hareholders?\s*[,.]/,
-      // "Separation and Distribution Agreement by and between [PARENT] and ..."
-      /[Ss]eparation\s+and\s+[Dd]istribution\s+[Aa]greement\s+by\s+and\s+between\s+([A-Z][\w .&,-]{2,80}?)\s+and\s+(?:the\s+registrant|the\s+[Cc]ompany|[A-Z][\w ]{2,40})/,
-      // "currently a wholly-owned subsidiary of [PARENT]"
-      /(?:currently\s+(?:is\s+)?(?:a\s+)?)?wholly[- ]owned\s+subsidiar(?:y|ies)\s+of\s+([A-Z][\w .&,-]{2,80}?)(?:\s+\(|\s*[.,])/,
-      // "spun off from [PARENT]"  /  "will be spun off from [PARENT]"
+    // Each captures the parent company name in group 1.
+    // Tier A (openWindow only, unambiguous cover-letter patterns):
+    const tierA = [
+      // "Dear [Parent] Stockholder:" / "Dear [Parent] Shareholders,"
+      /\bDear\s+([A-Z][\w .&,-]{2,60}?)\s+(?:[Ss]tockholders?|[Ss]hareholders?|[Hh]olders?)\s*[,:.]/,
+      // "shareholders of [PARENT] as of the record / will receive / approved / of record"
+      /\b(?:stockholders|shareholders)\s+of\s+([A-Z][\w .&,-]{2,80}?)\s+(?:as\s+of\s+the\s+record|will\s+receive|of\s+record|approved|\(|voted)/i,
+    ];
+    // Tier B (fullWindow, still strong but slightly less bulletproof):
+    const tierB = [
+      // "Separation and Distribution Agreement by and between [PARENT] and [filer]"
+      /[Ss]eparation\s+and\s+[Dd]istribution\s+[Aa]greement\s+(?:\(\s*the\s+[^)]+\)\s+)?by\s+and\s+between\s+([A-Z][\w .&,-]{2,80}?)\s+and\s+(?:the\s+registrant|the\s+[Cc]ompany|[A-Z][\w ]{2,40})/,
+      // "spun off from [PARENT]" / "will be spun off from [PARENT]"
       /(?:spun|spin)[- ]?off\s+(?:from|by)\s+([A-Z][\w .&,-]{2,80}?)(?:\s+\(|\s*[.,])/,
-      // "a spin-off of ... from [PARENT]"
+      // "a spin-off of [SpinCo] from [PARENT]"
       /\bspin[- ]?off\s+of\s+[^.]{0,120}?\s+from\s+([A-Z][\w .&,-]{2,80}?)(?:\s+\(|\s*[.,])/,
-      // "distribution by [PARENT] of"
+      // "distribution by [PARENT] of"  — must be in openWindow only (too generic otherwise)
       /\bdistribution\s+by\s+([A-Z][\w .&,-]{2,80}?)\s+of\s+/,
-      // "shareholders of [PARENT] as of the record date"
-      /\b(?:stockholders|shareholders)\s+of\s+([A-Z][\w .&,-]{2,80}?)\s+(?:as\s+of\s+the\s+record|will\s+receive|of\s+record)/,
+    ];
+    // Tier C (last resort, accept single-word names too):
+    //   "currently a wholly-owned subsidiary of [PARENT]"
+    //   but ONLY in openWindow, and ONLY if PARENT is NOT the filer itself.
+    const tierC = [
+      /(?:currently\s+(?:is\s+)?(?:a\s+)?)?wholly[- ]owned\s+subsidiar(?:y|ies)\s+of\s+([A-Z][\w .&,-]{2,80}?)(?:\s+\(|\s*[.,])/,
     ];
 
-    for (const p of patterns) {
-      const m = window.match(p);
-      if (!m) continue;
-      let name = m[1].trim().replace(/\s+/g, ' ');
-      // Strip trailing commas, periods, "and"
+    const validate = (rawName, { allowSingleWord = false } = {}) => {
+      let name = rawName.trim().replace(/\s+/g, ' ');
       name = name.replace(/[,.\s]+$/, '').replace(/\s+and$/, '');
-      // Validate: at least 2 words OR ends with common corporate suffix, and not too generic
       const badTokens = /^(the|that|this|our|its|such|any|each|company|business|segment|registrant|spinco|remainco|parent|group|board|court|state|united|section|article)$/i;
       const firstTok = name.split(/\s+/)[0] || '';
-      if (badTokens.test(firstTok)) continue;
-      if (name.length < 4 || name.length > 80) continue;
-      // Must contain at least one capital letter after the first (rules out ALL-CAPS headers falsely captured)
-      // Also reject single-word non-corporate names unless they end with Inc/Ltd/PLC/AG/Corp etc.
+      if (badTokens.test(firstTok)) return null;
+      if (name.length < 3 || name.length > 80) return null;
       const hasCorpSuffix = /(?:Inc|Corp(?:oration)?|Company|Co|Ltd|Limited|PLC|plc|AG|SA|NV|SE|SpA|AB|ASA|GmbH|LLC|LP|Holdings?|Group|Industries)\b\.?$/i.test(name);
       const hasMultipleWords = /\s/.test(name);
-      if (!hasCorpSuffix && !hasMultipleWords) continue;
-      // Looks clean. Try to find a ticker near the first mention.
-      // Pattern: "[Name] (NYSE: XYZ)" or "[Name] (XYZ)"
-      let parentTicker = null;
+      if (!hasCorpSuffix && !hasMultipleWords && !allowSingleWord) return null;
+      // Reject if it's the SpinCo / filer itself
+      if (isSelfRef(name)) return null;
+      return name;
+    };
+
+    const findTicker = (name) => {
       const nameEsc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const tickerHunt = new RegExp(nameEsc + '\\s*\\(\\s*(?:(?:NYSE|NASDAQ|AMEX|LSE|SIX|OTC)\\s*:\\s*)?([A-Z][A-Z0-9.\\-]{0,6})\\s*\\)');
       const tickerMatch = text.match(tickerHunt);
-      if (tickerMatch) parentTicker = tickerMatch[1];
-      return { parent_name: name, parent_ticker: parentTicker };
+      return tickerMatch ? tickerMatch[1] : null;
+    };
+
+    // Try Tier A (open window)
+    for (const p of tierA) {
+      const m = openWindow.match(p);
+      if (!m) continue;
+      const name = validate(m[1], { allowSingleWord: true });
+      if (!name) continue;
+      return { parent_name: name, parent_ticker: findTicker(name), match_pattern: 'A' };
+    }
+    // Try Tier B (full window)
+    for (const p of tierB) {
+      const m = fullWindow.match(p);
+      if (!m) continue;
+      const name = validate(m[1]);
+      if (!name) continue;
+      return { parent_name: name, parent_ticker: findTicker(name), match_pattern: 'B' };
+    }
+    // Try Tier C (open window only, allow single-word)
+    for (const p of tierC) {
+      const m = openWindow.match(p);
+      if (!m) continue;
+      const name = validate(m[1], { allowSingleWord: true });
+      if (!name) continue;
+      return { parent_name: name, parent_ticker: findTicker(name), match_pattern: 'C' };
     }
   }
   return null;

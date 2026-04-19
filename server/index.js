@@ -555,7 +555,8 @@ app.post('/api/admin/backfill-spin-parents', async (req, res) => {
     }
     params.push(limit);
     const rows = await query(
-      `SELECT id, headline, source_filing_url, source_cik, parent_name, parent_ticker
+      `SELECT id, headline, source_filing_url, source_cik, parent_name, parent_ticker,
+              spinco_name, target_name, primary_ticker
          FROM deals WHERE ${where.join(' AND ')}
         ORDER BY filing_date DESC NULLS LAST
         LIMIT $${params.length}`, params);
@@ -569,7 +570,10 @@ app.post('/api/admin/backfill-spin-parents', async (req, res) => {
       const raw = m[1];
       const dashed = `${raw.slice(0, 10)}-${raw.slice(10, 12)}-${raw.slice(12)}`;
       try {
-        const p = await extractSpinParent(dashed, r.source_cik);
+        // Exclude the filer's own name (which IS the SpinCo, not the parent).
+        // Use headline fallback if spinco/target_name aren't populated.
+        const excludeName = r.spinco_name || r.target_name || r.headline || '';
+        const p = await extractSpinParent(dashed, r.source_cik, excludeName);
         if (!p) continue;
         const sets = [];
         const vals = [];
