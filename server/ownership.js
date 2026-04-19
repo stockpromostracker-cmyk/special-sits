@@ -42,11 +42,30 @@ async function ownershipForDeal(deal) {
   // Trailing 3 years so we capture Form 3 (initial ownership) and subsequent activity.
   const cutoff = new Date(Date.now() - 3 * 365 * 86400 * 1000).toISOString().slice(0, 10);
 
+  // Name normalizer — strip corporate suffixes + lowercase. This lets us
+  // match "Signify N.V." ↔ "Signify" ↔ "Signify NV".
+  const normKey = (s) => String(s || '').toLowerCase()
+    .replace(/[,.]/g, ' ')
+    .replace(/\b(inc|corp|corporation|company|co|ltd|limited|plc|ag|sa|nv|n\.v|s\.a|se|spa|ab|asa|gmbh|llc|lp|oyj|abp|holdings?|group)\b/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+  const normNames = nameCandidates.map(normKey).filter(Boolean);
+
   const where = [`(issuer_ticker = $1 OR issuer_ticker = $2`];
   const params = [ticker, `US:${bareSymbol}`];
+  // Exact name match (original)
   for (const n of nameCandidates.slice(0, 4)) {
     params.push(n);
     where[0] += ` OR LOWER(issuer_name) = $${params.length}`;
+  }
+  // Prefix-match against normalized name — anchors at start and compares a
+  // meaningful substring so "Signify" matches "Signify N.V." without
+  // matching unrelated companies. We use LIKE on LOWER(issuer_name).
+  for (const n of normNames.slice(0, 4)) {
+    if (n.length < 4) continue; // too short, risk of false positives
+    params.push(`${n}%`);
+    where[0] += ` OR LOWER(issuer_name) LIKE $${params.length}`;
+    params.push(`% ${n} %`);
+    where[0] += ` OR ' ' || LOWER(issuer_name) || ' ' LIKE $${params.length}`;
   }
   where[0] += ')';
   params.push(cutoff);
