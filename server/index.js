@@ -506,6 +506,24 @@ app.post('/api/ingest/run', requireIngestToken, async (_req, res) => {
   }
 });
 
+// Admin utility: null out bad offer_price values on specific deals.
+// Useful when the LLM misextracts from an SEC filing (e.g. picks up a
+// historical price target or dividend amount) and the resulting spread
+// is absurd. Safer than deleting the deal.
+app.post('/api/admin/null-offer-price', async (req, res) => {
+  const adminOk = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  if (!adminOk) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const ids = String(req.query.ids || '').split(',').map(s => parseInt(s.trim(), 10)).filter(Boolean);
+    if (!ids.length) return res.status(400).json({ error: 'missing ids query parameter' });
+    const placeholders = ids.map((_, i) => `$${i+1}`).join(',');
+    await query(`UPDATE deals SET offer_price = NULL, spread_to_deal_pct = NULL, offer_price_converted = NULL WHERE id IN (${placeholders})`, ids);
+    res.json({ ok: true, cleared: ids });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // One-shot migration: wipe price fields that were stored in native currency
 // before the FX-normalisation fix (April 2026). Previously, quotes returning
 // currency 'GBp' fell through to `quote.price ?? null` because FX_CACHE had
