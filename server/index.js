@@ -524,6 +524,29 @@ app.post('/api/admin/null-offer-price', async (req, res) => {
   }
 });
 
+// Admin utility: refresh market data for a single deal by ID.
+// Useful when a bulk refresh-prices call silently errored on one symbol
+// (e.g. Yahoo rate-limit returning null). Does the same work as
+// refreshAllDeals but scoped to one row.
+app.post('/api/admin/refresh-deal/:id', async (req, res) => {
+  const adminOk = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  if (!adminOk) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ error: 'bad id' });
+    const { refreshDeal, refreshFx } = require('./market_data');
+    const rows = await query(`SELECT * FROM deals WHERE id = $1`, [id]);
+    if (!rows.length) return res.status(404).json({ error: 'not found' });
+    await refreshFx();
+    const result = await refreshDeal(rows[0]);
+    // Return updated row for inspection.
+    const after = await query(`SELECT id, primary_ticker, yahoo_symbol, currency, current_price, announce_price, parent_current_price, spinco_current_price, parent_return_pct, spinco_return_pct, offer_price, spread_to_deal_pct FROM deals WHERE id = $1`, [id]);
+    res.json({ ok: true, result, after: after[0] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // One-shot migration: wipe price fields that were stored in native currency
 // before the FX-normalisation fix (April 2026). Previously, quotes returning
 // currency 'GBp' fell through to `quote.price ?? null` because FX_CACHE had
