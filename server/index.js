@@ -149,7 +149,7 @@ app.get('/api/deals', async (req, res, next) => {
   try {
   const { type, status, region, q, country, market_cap_bucket, deal_size_bucket,
           insider_signal, event_type, data_source_tier, timeframe,
-          include_spacs } = req.query;
+          include_spacs, arb_filter } = req.query;
   const where = [];
   const params = [];
   if (type)   { params.push(type);   where.push(`deal_type = $${params.length}`); }
@@ -188,6 +188,27 @@ app.get('/api/deals', async (req, res, next) => {
     params.push(lo); where.push(`deal_value_usd >= $${params.length}`);
     if (hi != null) { params.push(hi); where.push(`deal_value_usd < $${params.length}`); }
   }
+  // Merger-arb priority filters
+  //   arb_filter='below_offer' — offer_price set AND current_price < offer_price (unfilled spread)
+  //   arb_filter='tight_spread' — above AND spread <= 3%
+  //   arb_filter='closing_soon' — expected_close_date within 90 days
+  //   arb_filter='closing_soon_below' — both of the above
+  // Portable "upcoming close" predicate: string-compare ISO dates, which works
+  // on both Postgres (TEXT) and SQLite.
+  const today = new Date().toISOString().slice(0, 10);
+  const in90 = new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10);
+  const closingSoon = `expected_close_date IS NOT NULL AND expected_close_date >= '${today}' AND expected_close_date <= '${in90}'`;
+  if (arb_filter === 'below_offer') {
+    where.push(`offer_price IS NOT NULL AND current_price IS NOT NULL AND current_price < offer_price`);
+  } else if (arb_filter === 'tight_spread') {
+    where.push(`offer_price IS NOT NULL AND current_price IS NOT NULL AND current_price < offer_price AND ((offer_price - current_price) / current_price) <= 0.03`);
+  } else if (arb_filter === 'closing_soon') {
+    where.push(closingSoon);
+  } else if (arb_filter === 'closing_soon_below') {
+    where.push(`offer_price IS NOT NULL AND current_price IS NOT NULL AND current_price < offer_price`);
+    where.push(closingSoon);
+  }
+
   // Insider / incentive signal filter
   if (insider_signal === 'cluster')         where.push(`cluster_buying = 1`);
   else if (insider_signal === 'mgmt_spin')  where.push(`mgmt_moves_to_spinco = 1`);
@@ -504,6 +525,126 @@ app.post('/api/admin/backfill-merger-terms', async (req, res) => {
     res.json({ ok: true, dryRun, scanned, updated, errors, samples });
   } catch (e) {
     console.error('[backfill-merger-terms]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Backfill parent_name / parent_ticker for existing spin-off deals.
+// For each spin_off with missing parent data, fetch the 10-12B/A (or 8-K)
+// Information Statement exhibit and apply a battery of parent-naming
+// regexes. Idempotent.
+app.post('/api/admin/backfill-spin-parents', async (req, res) => {
+  const ingestOk = INGEST_TOKEN && req.header('x-ingest-token') === INGEST_TOKEN;
+  const adminOk  = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  if (!ingestOk && !adminOk) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const dryRun = req.query.dry === '1';
+    const limit = Math.min(parseInt(req.query.limit || '80', 10), 300);
+    const onlyIds = req.query.ids ? String(req.query.ids).split(',').map(s => parseInt(s, 10)).filter(Boolean) : null;
+    const { extractSpinParent } = require('./sources/sec');
+    const where = [
+      `deal_type = 'spin_off'`,
+      `source_filing_url IS NOT NULL`,
+      `source_cik IS NOT NULL`,
+      `(parent_name IS NULL OR parent_ticker IS NULL)`,
+    ];
+    const params = [];
+    if (onlyIds && onlyIds.length) {
+      params.push(onlyIds);
+      where.push(`id = ANY($${params.length})`);
+    }
+    params.push(limit);
+    const rows = await query(
+      `SELECT id, headline, source_filing_url, source_cik, parent_name, parent_ticker
+         FROM deals WHERE ${where.join(' AND ')}
+        ORDER BY filing_date DESC NULLS LAST
+        LIMIT $${params.length}`, params);
+    let scanned = 0, updated = 0, errors = 0;
+    const samples = [];
+    const accRe = /\/Archives\/edgar\/data\/\d+\/(\d{18})\//;
+    for (const r of rows) {
+      scanned++;
+      const m = String(r.source_filing_url).match(accRe);
+      if (!m) continue;
+      const raw = m[1];
+      const dashed = `${raw.slice(0, 10)}-${raw.slice(10, 12)}-${raw.slice(12)}`;
+      try {
+        const p = await extractSpinParent(dashed, r.source_cik);
+        if (!p) continue;
+        const sets = [];
+        const vals = [];
+        if (!r.parent_name && p.parent_name) { sets.push(`parent_name = $${sets.length + 1}`); vals.push(p.parent_name); }
+        if (!r.parent_ticker && p.parent_ticker) { sets.push(`parent_ticker = $${sets.length + 1}`); vals.push(p.parent_ticker); }
+        if (!sets.length) continue;
+        if (samples.length < 10) samples.push({ id: r.id, headline: r.headline, ...p });
+        if (!dryRun) {
+          vals.push(r.id);
+          await query(`UPDATE deals SET ${sets.join(', ')} WHERE id = $${vals.length}`, vals);
+        }
+        updated++;
+      } catch (e) {
+        errors++;
+      }
+    }
+    res.json({ ok: true, dryRun, scanned, updated, errors, samples });
+  } catch (e) {
+    console.error('[backfill-spin-parents]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Sibling / relationship graph for a deal.
+// Returns: { self, parent, spinco, siblings }
+// A sibling is another spin_off with the same parent_ticker.
+app.get('/api/deals/:id/related', async (req, res) => {
+  try {
+    const [self] = await query(`SELECT * FROM deals WHERE id = $1`, [req.params.id]);
+    if (!self) return res.status(404).json({ error: 'not found' });
+    const nodes = { self: serializeDeal(self), parent: null, spinco: null, siblings: [] };
+
+    // Parent node: look up by parent_ticker (try as primary_ticker, target_ticker, etc)
+    if (self.parent_ticker) {
+      const [parentRow] = await query(
+        `SELECT id, headline, deal_type, primary_ticker, current_price, parent_ticker, spinco_ticker
+           FROM deals
+          WHERE primary_ticker = $1 OR target_ticker = $1 OR spinco_ticker = $1
+          LIMIT 1`, [self.parent_ticker]);
+      nodes.parent = parentRow ? { id: parentRow.id, name: self.parent_name || parentRow.headline, ticker: self.parent_ticker, deal_type: parentRow.deal_type } : { id: null, name: self.parent_name, ticker: self.parent_ticker, deal_type: null };
+    } else if (self.parent_name) {
+      nodes.parent = { id: null, name: self.parent_name, ticker: null, deal_type: null };
+    }
+
+    // Spinco node (if self is parent-side view)
+    if (self.spinco_ticker && self.spinco_ticker !== self.primary_ticker) {
+      const [spincoRow] = await query(
+        `SELECT id, headline, deal_type FROM deals WHERE primary_ticker = $1 OR spinco_ticker = $1 LIMIT 1`,
+        [self.spinco_ticker]);
+      nodes.spinco = spincoRow ? { id: spincoRow.id, name: self.spinco_name || spincoRow.headline, ticker: self.spinco_ticker, deal_type: spincoRow.deal_type } : { id: null, name: self.spinco_name, ticker: self.spinco_ticker, deal_type: null };
+    }
+
+    // Siblings: other spin-offs with the same parent_ticker (or parent_name if ticker missing)
+    let siblingRows = [];
+    if (self.parent_ticker) {
+      siblingRows = await query(
+        `SELECT id, headline, spinco_ticker, spinco_name, completed_date, deal_type
+           FROM deals
+          WHERE deal_type = 'spin_off' AND id != $1 AND parent_ticker = $2
+          ORDER BY completed_date DESC NULLS LAST LIMIT 20`, [self.id, self.parent_ticker]);
+    } else if (self.parent_name) {
+      siblingRows = await query(
+        `SELECT id, headline, spinco_ticker, spinco_name, completed_date, deal_type
+           FROM deals
+          WHERE deal_type = 'spin_off' AND id != $1 AND parent_name = $2
+          ORDER BY completed_date DESC NULLS LAST LIMIT 20`, [self.id, self.parent_name]);
+    }
+    nodes.siblings = siblingRows.map(r => ({
+      id: r.id, headline: r.headline, ticker: r.spinco_ticker,
+      name: r.spinco_name, completed_date: r.completed_date, deal_type: r.deal_type,
+    }));
+
+    res.json(nodes);
+  } catch (e) {
+    console.error('[related]', e);
     res.status(500).json({ error: e.message });
   }
 });

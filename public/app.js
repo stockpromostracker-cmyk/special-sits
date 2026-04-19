@@ -121,6 +121,7 @@ async function renderScreener() {
       <select id="f-mcap"><option value="">Any market cap</option>${MCAP_BUCKETS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select>
       <select id="f-dsize"><option value="">Any deal size</option>${DEAL_SIZE_BUCKETS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select>
       <select id="f-insider"><option value="">Any insider signal</option>${INSIDER_SIGNALS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select>
+      <select id="f-arb" title="Merger-arb filters — only affect rows with an expected-close date or an offer price"><option value="">Any arb</option><option value="below_offer">Trading below offer</option><option value="tight_spread">Tight spread (<3%)</option><option value="closing_soon">Closing &lt; 90d</option><option value="closing_soon_below">Closing &lt; 90d &amp; below offer</option></select>
       <label class="filter-check" title="By default, SPAC shells are hidden (they clog the IPO feed with no-price rows)"><input id="f-spacs" type="checkbox" /> Show SPACs</label>
       <span class="spacer"></span>
       <button class="btn-ghost btn" id="f-reset">Reset</button>
@@ -147,10 +148,10 @@ async function renderScreener() {
 
   document.getElementById('f-q').addEventListener('input', debounce(applyFilters, 250));
   document.getElementById('f-spacs').addEventListener('change', applyFilters);
-  ['f-type','f-status','f-region','f-country','f-mcap','f-dsize','f-insider','f-event','f-tier'].forEach(id =>
+  ['f-type','f-status','f-region','f-country','f-mcap','f-dsize','f-insider','f-event','f-tier','f-arb'].forEach(id =>
     document.getElementById(id).addEventListener('change', applyFilters));
   document.getElementById('f-reset').addEventListener('click', () => {
-    ['f-q','f-type','f-status','f-region','f-country','f-mcap','f-dsize','f-insider','f-event','f-tier']
+    ['f-q','f-type','f-status','f-region','f-country','f-mcap','f-dsize','f-insider','f-event','f-tier','f-arb']
       .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
     document.getElementById('f-spacs').checked = false;
     state.filters.timeframe = '';
@@ -292,6 +293,7 @@ function applyFilters() {
     insider_signal: document.getElementById('f-insider').value,
     event_type: document.getElementById('f-event').value,
     data_source_tier: document.getElementById('f-tier').value,
+    arb_filter: document.getElementById('f-arb')?.value || '',
     timeframe: state.filters.timeframe || '',
     include_spacs: document.getElementById('f-spacs').checked ? '1' : '',
   };
@@ -307,9 +309,10 @@ async function openDrawer(id) {
   drawer.querySelector('.drawer-close').addEventListener('click', closeDrawer);
 
   try {
-    const [d, inc] = await Promise.all([
+    const [d, inc, rel] = await Promise.all([
       api(`/api/deals/${id}`),
       api(`/api/deals/${id}/incentives`).catch(() => null),
+      api(`/api/deals/${id}/related`).catch(() => null),
     ]);
     const kd = d.key_dates && typeof d.key_dates === 'object' ? d.key_dates : {};
     drawer.innerHTML = `
@@ -428,6 +431,10 @@ async function openDrawer(id) {
           </dl>
         </div>
 
+        ${renderRelationshipGraph(rel, d)}
+
+        ${renderOfficialDocLinks(d)}
+
         <div class="section">
           <h3>Timeline</h3>
           <dl class="kv">
@@ -444,7 +451,7 @@ async function openDrawer(id) {
           </dl>
         </div>
 
-        ${renderEventTimeline(d)}
+        ${renderEventTimeline(d, { groupSameDate: true })}
       </div>
     `;
     drawer.querySelector('.drawer-close').addEventListener('click', closeDrawer);
@@ -467,6 +474,123 @@ function nameTicker(name, ticker) {
   if (!name && !ticker) return null;
   if (name && ticker) return `${name} (${ticker})`;
   return name || ticker;
+}
+
+// -----------------------------------------------------------------
+// Relationship graph — shows Parent ↔ Self ↔ SpinCo chain plus siblings
+// (other spin-offs from the same parent). Every node with an id is a
+// clickable drawer link; nodes without id are still labeled so the
+// user sees the chain.
+function renderRelationshipGraph(rel, self) {
+  if (!rel) return '';
+  const hasParent = rel.parent && (rel.parent.name || rel.parent.ticker);
+  const hasSpinco = rel.spinco && (rel.spinco.name || rel.spinco.ticker);
+  const siblings = Array.isArray(rel.siblings) ? rel.siblings : [];
+  if (!hasParent && !hasSpinco && !siblings.length) return '';
+
+  const nodeHtml = (node, role) => {
+    if (!node) return `<div class="rg-node rg-empty">—</div>`;
+    const label = nameTicker(node.name, node.ticker) || node.headline || node.ticker || '?';
+    const inner = `<span class="rg-role">${role}</span><span class="rg-label">${esc(label)}</span>`;
+    if (node.id && node.id !== self.id) {
+      return `<a class="rg-node rg-link" href="#" data-open-deal="${node.id}">${inner}</a>`;
+    }
+    return `<div class="rg-node ${node.id === self.id ? 'rg-self' : ''}">${inner}</div>`;
+  };
+
+  const selfNode = { id: self.id, name: self.spinco_name || self.target_name || self.primary_ticker, ticker: self.primary_ticker };
+  const chain = `
+    <div class="rg-chain">
+      ${nodeHtml(rel.parent, 'Parent')}
+      <div class="rg-arrow">→</div>
+      ${nodeHtml(selfNode, self.deal_type === 'spin_off' ? 'SpinCo' : 'This deal')}
+      ${hasSpinco ? `<div class="rg-arrow">→</div>${nodeHtml(rel.spinco, 'SpinCo')}` : ''}
+    </div>`;
+
+  const sibHtml = siblings.length
+    ? `<div class="rg-siblings">
+         <h4>Other spin-offs from the same parent</h4>
+         <ul class="rg-sib-list">
+           ${siblings.map(s => {
+             const lbl = nameTicker(s.name, s.ticker) || s.headline;
+             const date = s.completed_date ? ` <span class="rg-date">· ${s.completed_date}</span>` : '';
+             return `<li><a href="#" data-open-deal="${s.id}">${esc(lbl)}</a>${date}</li>`;
+           }).join('')}
+         </ul>
+       </div>`
+    : '';
+
+  return `
+    <div class="section">
+      <h3>Relationship</h3>
+      ${chain}
+      ${sibHtml}
+    </div>`;
+}
+
+// Wire up clicks on relationship graph links + sibling list to re-open drawer.
+// Uses event delegation on document so the handler covers fresh markup.
+if (!window.__rgGraphWired) {
+  window.__rgGraphWired = true;
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('[data-open-deal]');
+    if (!a) return;
+    e.preventDefault();
+    const id = parseInt(a.getAttribute('data-open-deal'), 10);
+    if (id) openDrawer(id);
+  });
+}
+
+// -----------------------------------------------------------------
+// Compensation & ownership link-outs. Surface the DEF 14A / proxy URL
+// for US tickers and a Schedule 13D/G search for ownership research.
+function renderOfficialDocLinks(d) {
+  const ticker = d.primary_ticker || d.target_ticker;
+  const parentTicker = d.parent_ticker;
+  const cik = d.source_cik;
+  // Build SEC EDGAR-browse URLs by CIK (only for US issuers with a CIK we know)
+  const usIssuer = d.country === 'US' || (cik && /^\d+$/.test(String(cik)));
+  const links = [];
+  if (cik) {
+    const cikPlain = String(cik).replace(/^0+/, '');
+    links.push({
+      label: 'DEF 14A (proxy — executive compensation)',
+      url: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${cikPlain}&type=DEF+14A&dateb=&owner=include&count=10`,
+      hint: 'Annual proxy: CEO/CFO comp, equity grants, golden parachutes',
+    });
+    links.push({
+      label: 'Schedule 13D / 13G (5%+ beneficial owners)',
+      url: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${cikPlain}&type=SC+13&dateb=&owner=include&count=20`,
+      hint: 'Activist or strategic investor stakes',
+    });
+    links.push({
+      label: 'Form 4 insider transactions',
+      url: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${cikPlain}&type=4&dateb=&owner=include&count=40`,
+      hint: 'Every insider trade by officers & directors',
+    });
+    links.push({
+      label: 'Form 3 initial ownership (post-spin / post-IPO)',
+      url: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${cikPlain}&type=3&dateb=&owner=include&count=20`,
+      hint: 'Who owned what on day one',
+    });
+  }
+  // Parent-side links
+  if (parentTicker && d.deal_type === 'spin_off' && usIssuer) {
+    links.push({
+      label: `Parent ${esc(parentTicker)} — DEF 14A`,
+      url: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${encodeURIComponent(parentTicker)}&type=DEF+14A&dateb=&owner=include&count=10`,
+      hint: 'Compare parent vs spinco exec incentives',
+    });
+  }
+  if (!links.length) return '';
+  return `
+    <div class="section">
+      <h3>Compensation &amp; ownership</h3>
+      <p class="hint-text">Skin-in-the-game research: who owns it, how they're paid.</p>
+      <ul class="doc-links">
+        ${links.map(l => `<li><a href="${esc(l.url)}" target="_blank" rel="noopener"><span class="doc-link-label">${l.label} ↗</span><span class="doc-link-hint">${esc(l.hint)}</span></a></li>`).join('')}
+      </ul>
+    </div>`;
 }
 
 function renderIncentiveSection(inc) {
@@ -689,7 +813,9 @@ function renderChartSection(d) {
 // Merges: filing documents (d.sources), news items (d.news_items), and key
 // deal dates (announce_date, filing_date, ex_date, expected_close, completed).
 // Sorted newest-first. Each row carries a tier color.
-function renderEventTimeline(d) {
+function renderEventTimeline(d, opts) {
+  opts = opts || {};
+  const groupSameDate = !!opts.groupSameDate;
   const events = [];
   // Build useful fallback URLs that every pseudo-event can fall back to.
   const primaryFilingUrl = d.source_filing_url || null;
@@ -785,24 +911,77 @@ function renderEventTimeline(d) {
   const tierIcon = { official: '📄', upcoming: '⏳', news: '📰' };
   const tierCls  = { official: 'ev-official', upcoming: 'ev-upcoming', news: 'ev-news' };
 
+  const renderSubEntry = (e) => `
+    <div class="event-sub">
+      <div class="event-marker">${tierIcon[e.tier] || '•'}</div>
+      <div class="event-body">
+        <div class="event-meta">
+          <span class="event-source">${esc(e.source)}</span>
+          ${e.matchKind ? `<span class="event-match mute">via ${esc(e.matchKind.replace('_', ' '))}</span>` : ''}
+        </div>
+        <div class="event-headline">${esc(e.headline)}</div>
+        ${e.summary ? `<div class="event-summary mute">${esc(e.summary)}${e.summary.length >= 200 ? '…' : ''}</div>` : ''}
+        ${e.url ? `<a class="event-link" href="${esc(e.url)}" target="_blank" rel="noopener">Open ↗</a>` : ''}
+      </div>
+    </div>`;
+
+  const renderSingle = (e) => `
+    <li class="event-item ${tierCls[e.tier] || ''}">
+      <div class="event-marker">${tierIcon[e.tier] || '•'}</div>
+      <div class="event-body">
+        <div class="event-meta">
+          <span class="event-date mono">${e.date ? esc(e.date) : '—'}</span>
+          <span class="event-source">${esc(e.source)}</span>
+          ${e.matchKind ? `<span class="event-match mute">via ${esc(e.matchKind.replace('_', ' '))}</span>` : ''}
+        </div>
+        <div class="event-headline">${esc(e.headline)}</div>
+        ${e.summary ? `<div class="event-summary mute">${esc(e.summary)}${e.summary.length >= 200 ? '…' : ''}</div>` : ''}
+        ${e.url ? `<a class="event-link" href="${esc(e.url)}" target="_blank" rel="noopener">Open ↗</a>` : ''}
+      </div>
+    </li>`;
+
+  let bodyHtml;
+  if (groupSameDate) {
+    // Bucket by date (events without date share an empty-key bucket)
+    const buckets = [];
+    const byDate = new Map();
+    for (const e of events) {
+      const key = e.date || '__nodate__';
+      if (!byDate.has(key)) {
+        const b = { date: e.date || null, tier: e.tier, items: [] };
+        byDate.set(key, b);
+        buckets.push(b);
+      }
+      const b = byDate.get(key);
+      b.items.push(e);
+      // Promote tier: official > upcoming > news
+      const rank = { official: 3, upcoming: 2, news: 1 };
+      if ((rank[e.tier] || 0) > (rank[b.tier] || 0)) b.tier = e.tier;
+    }
+    bodyHtml = buckets.map(b => {
+      if (b.items.length === 1) return renderSingle(b.items[0]);
+      return `<li class="event-item tl-date-group ${tierCls[b.tier] || ''}">
+        <div class="event-marker">${tierIcon[b.tier] || '•'}</div>
+        <div class="event-body">
+          <div class="event-meta">
+            <span class="event-date mono">${b.date ? esc(b.date) : '—'}</span>
+            <span class="event-source">${b.items.length} events on this date</span>
+          </div>
+          <div class="event-sub-list">
+            ${b.items.map(renderSubEntry).join('')}
+          </div>
+        </div>
+      </li>`;
+    }).join('');
+  } else {
+    bodyHtml = events.map(renderSingle).join('');
+  }
+
   return `<div class="section timeline-section">
     <h3>Deal timeline <span class="section-count">${events.length}</span></h3>
     <p class="section-hint">Filings, key dates, and related news merged chronologically. Filings and key dates are source-of-truth; news items are enrichment only.</p>
     <ol class="event-timeline">
-      ${events.map(e => `
-        <li class="event-item ${tierCls[e.tier] || ''}">
-          <div class="event-marker">${tierIcon[e.tier] || '•'}</div>
-          <div class="event-body">
-            <div class="event-meta">
-              <span class="event-date mono">${e.date ? esc(e.date) : '—'}</span>
-              <span class="event-source">${esc(e.source)}</span>
-              ${e.matchKind ? `<span class="event-match mute">via ${esc(e.matchKind.replace('_', ' '))}</span>` : ''}
-            </div>
-            <div class="event-headline">${esc(e.headline)}</div>
-            ${e.summary ? `<div class="event-summary mute">${esc(e.summary)}${e.summary.length >= 200 ? '…' : ''}</div>` : ''}
-            ${e.url ? `<a class="event-link" href="${esc(e.url)}" target="_blank" rel="noopener">Open ↗</a>` : ''}
-          </div>
-        </li>`).join('')}
+      ${bodyHtml}
     </ol>
   </div>`;
 }

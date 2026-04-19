@@ -510,6 +510,115 @@ async function fetchAll({ since } = {}) {
 function today()     { return new Date().toISOString().slice(0, 10); }
 function daysAgo(n)  { const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10); }
 
+// --------------------------------------------------------------------------
+// Parent-company extractor for spin-off filings (10-12B/A, 8-K/2.01)
+//
+// Most spin-off 10-12B/A filings DON'T name the parent in the main doc —
+// they reference the Information Statement exhibit (EX-99.1) by item.
+// So we fetch EX-99.1 first (or the largest non-main htm if EX-99.1 missing)
+// and apply a battery of high-precision patterns:
+//
+//   "Separation and Distribution Agreement by and between <PARENT> and the registrant"
+//   "wholly-owned subsidiary of <PARENT>"
+//   "Dear <PARENT> Shareholders"        (cover letter)
+//   "spin off as X ... from <PARENT>"
+//   "stockholders of <PARENT> will receive"
+//
+// Returns { parent_name, parent_ticker } or null.
+async function extractSpinParent(accession, cik) {
+  if (!accession || !cik) return null;
+  const raw = String(accession).replace(/-/g, '');
+  const cikPlain = String(cik).replace(/^0+/, '') || '0';
+  const indexJson = `https://www.sec.gov/Archives/edgar/data/${cikPlain}/${raw}/index.json`;
+
+  let items = [];
+  try {
+    const r = await fetch(indexJson, { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
+    if (!r.ok) return null;
+    const j = await r.json();
+    items = j.directory?.item || [];
+  } catch { return null; }
+
+  // Preferred reading order:
+  //   1. EX-99.1 (information statement) — always names parent at top
+  //   2. Any other EX-99.x
+  //   3. The main 10-12B doc itself (sometimes has Exhibit 2.1 reference)
+  const candidates = [];
+  const ex991 = items.find(it => /ex[-_]?99[-_]?1\b/i.test(it.name) && /\.htm?$/i.test(it.name));
+  if (ex991) candidates.push(ex991.name);
+  const exOthers = items.filter(it => /^.*ex[-_]?99/i.test(it.name) && /\.htm?$/i.test(it.name) && it.name !== ex991?.name);
+  for (const e of exOthers) candidates.push(e.name);
+  const mains = items.filter(it => /\.htm?$/i.test(it.name) && !/^ex[-_]/i.test(it.name) && !/^(R\d+|Financial)/.test(it.name));
+  mains.sort((a, b) => Number(b.size || 0) - Number(a.size || 0));
+  if (mains[0]) candidates.push(mains[0].name);
+
+  // Try each candidate in order; stop at first confident match.
+  for (const docName of candidates) {
+    const docUrl = `https://www.sec.gov/Archives/edgar/data/${cikPlain}/${raw}/${docName}`;
+    let text;
+    try {
+      const r = await fetch(docUrl, { headers: { 'User-Agent': UA, 'Accept': 'text/html' } });
+      if (!r.ok) continue;
+      // First 500KB is enough; parent is always named in opening material.
+      const buf = await r.arrayBuffer();
+      const html = Buffer.from(buf.slice(0, 500_000)).toString('utf8');
+      text = html.replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;|&#160;|&#8203;|&#8201;/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&#8220;|&#8221;|&ldquo;|&rdquo;/g, '"')
+        .replace(/&#8217;|&#8216;|&rsquo;|&lsquo;/g, "'")
+        .replace(/\s+/g, ' ');
+    } catch { continue; }
+
+    const window = text.slice(0, 60_000);
+    // Patterns ordered strongest → weakest. First match wins.
+    // Each captures the parent company name.
+    const patterns = [
+      // "Dear [Parent] Shareholders," — cover-letter opener in EX-99.1
+      /\bDear\s+([A-Z][\w .&,-]{2,60}?)\s+[Ss]hareholders?\s*[,.]/,
+      // "Separation and Distribution Agreement by and between [PARENT] and ..."
+      /[Ss]eparation\s+and\s+[Dd]istribution\s+[Aa]greement\s+by\s+and\s+between\s+([A-Z][\w .&,-]{2,80}?)\s+and\s+(?:the\s+registrant|the\s+[Cc]ompany|[A-Z][\w ]{2,40})/,
+      // "currently a wholly-owned subsidiary of [PARENT]"
+      /(?:currently\s+(?:is\s+)?(?:a\s+)?)?wholly[- ]owned\s+subsidiar(?:y|ies)\s+of\s+([A-Z][\w .&,-]{2,80}?)(?:\s+\(|\s*[.,])/,
+      // "spun off from [PARENT]"  /  "will be spun off from [PARENT]"
+      /(?:spun|spin)[- ]?off\s+(?:from|by)\s+([A-Z][\w .&,-]{2,80}?)(?:\s+\(|\s*[.,])/,
+      // "a spin-off of ... from [PARENT]"
+      /\bspin[- ]?off\s+of\s+[^.]{0,120}?\s+from\s+([A-Z][\w .&,-]{2,80}?)(?:\s+\(|\s*[.,])/,
+      // "distribution by [PARENT] of"
+      /\bdistribution\s+by\s+([A-Z][\w .&,-]{2,80}?)\s+of\s+/,
+      // "shareholders of [PARENT] as of the record date"
+      /\b(?:stockholders|shareholders)\s+of\s+([A-Z][\w .&,-]{2,80}?)\s+(?:as\s+of\s+the\s+record|will\s+receive|of\s+record)/,
+    ];
+
+    for (const p of patterns) {
+      const m = window.match(p);
+      if (!m) continue;
+      let name = m[1].trim().replace(/\s+/g, ' ');
+      // Strip trailing commas, periods, "and"
+      name = name.replace(/[,.\s]+$/, '').replace(/\s+and$/, '');
+      // Validate: at least 2 words OR ends with common corporate suffix, and not too generic
+      const badTokens = /^(the|that|this|our|its|such|any|each|company|business|segment|registrant|spinco|remainco|parent|group|board|court|state|united|section|article)$/i;
+      const firstTok = name.split(/\s+/)[0] || '';
+      if (badTokens.test(firstTok)) continue;
+      if (name.length < 4 || name.length > 80) continue;
+      // Must contain at least one capital letter after the first (rules out ALL-CAPS headers falsely captured)
+      // Also reject single-word non-corporate names unless they end with Inc/Ltd/PLC/AG/Corp etc.
+      const hasCorpSuffix = /(?:Inc|Corp(?:oration)?|Company|Co|Ltd|Limited|PLC|plc|AG|SA|NV|SE|SpA|AB|ASA|GmbH|LLC|LP|Holdings?|Group|Industries)\b\.?$/i.test(name);
+      const hasMultipleWords = /\s/.test(name);
+      if (!hasCorpSuffix && !hasMultipleWords) continue;
+      // Looks clean. Try to find a ticker near the first mention.
+      // Pattern: "[Name] (NYSE: XYZ)" or "[Name] (XYZ)"
+      let parentTicker = null;
+      const nameEsc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const tickerHunt = new RegExp(nameEsc + '\\s*\\(\\s*(?:(?:NYSE|NASDAQ|AMEX|LSE|SIX|OTC)\\s*:\\s*)?([A-Z][A-Z0-9.\\-]{0,6})\\s*\\)');
+      const tickerMatch = text.match(tickerHunt);
+      if (tickerMatch) parentTicker = tickerMatch[1];
+      return { parent_name: name, parent_ticker: parentTicker };
+    }
+  }
+  return null;
+}
+
 module.exports = {
   fetchAll,
   fetchSpinoffPipeline,
@@ -520,4 +629,5 @@ module.exports = {
   parseDisplayName,   // exported for tests
   extractOfferTerms,  // exported for backfill admin endpoint
   enrichMergerDeal,
+  extractSpinParent,  // exported for parent backfill endpoint
 };
