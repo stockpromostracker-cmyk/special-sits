@@ -337,8 +337,10 @@ async function openDrawer(id) {
             ${row('Current price', d.current_price != null ? `$${Number(d.current_price).toFixed(2)}` : null)}
             ${(() => {
               const isSpin = (d.deal_type === 'spin_off') || (d.event_type && d.event_type.startsWith('spin'));
+              const isMerger = (d.deal_type === 'merger_arb') || (d.event_type && d.event_type.startsWith('merger'));
               // Helper: emit a <dt>/<dd> with raw HTML (bypasses esc() in row())
               const rawRow = (label, html) => `<dt>${label}</dt><dd>${html != null ? html : '—'}</dd>`;
+
               if (isSpin && (d.parent_return_pct != null || d.spinco_return_pct != null)) {
                 const pr = d.parent_return_pct, sr = d.spinco_return_pct;
                 const pLabel = `Parent return <span class="kv-hint" title="RemainCo performance since ex-date">ⓘ</span>`;
@@ -346,6 +348,12 @@ async function openDrawer(id) {
                 return rawRow(pLabel, pr != null ? `<span class="${returnClass(pr)}">${fmtReturn(pr)}</span>` : null)
                      + rawRow(sLabel, sr != null ? `<span class="${returnClass(sr)}">${fmtReturn(sr)}</span>` : null);
               }
+
+              // For mergers, suppress the misleading "return since announce" here.
+              // The dedicated "Merger arb" section below shows spread-to-deal,
+              // unaffected price, and bid premium — the metrics that actually matter.
+              if (isMerger) return '';
+
               const ap = d.announce_price, cp = d.current_price;
               if (ap == null || cp == null) return '';
               const r = ((cp-ap)/ap)*100;
@@ -357,15 +365,49 @@ async function openDrawer(id) {
 
         ${renderIncentiveSection(inc)}
 
-        <div class="section">
-          <h3>Deal terms</h3>
-          <dl class="kv">
-            ${row('Consideration', d.consideration)}
-            ${row('Offer price', d.offer_price)}
-            ${row('Deal value (USD)', d.deal_value_usd ? fmtM(d.deal_value_usd) + 'M' : null)}
-            ${row('Current spread', d.spread_pct != null ? d.spread_pct + '%' : null)}
-          </dl>
-        </div>
+        ${(() => {
+          const isMerger = (d.deal_type === 'merger_arb') || (d.event_type && d.event_type.startsWith('merger'));
+          if (!isMerger) {
+            return `<div class="section"><h3>Deal terms</h3><dl class="kv">
+              ${row('Consideration', d.consideration)}
+              ${row('Offer price', d.offer_price != null ? `$${Number(d.offer_price).toFixed(2)}` : null)}
+              ${row('Deal value (USD)', d.deal_value_usd ? fmtM(d.deal_value_usd) + 'M' : null)}
+              ${row('Current spread', d.spread_pct != null ? d.spread_pct + '%' : null)}
+            </dl></div>`;
+          }
+          // ---- Merger arb section — the metrics that actually matter ----
+          const rawRow = (label, html) => `<dt>${label}</dt><dd>${html != null ? html : '—'}</dd>`;
+          const offer = d.offer_price;
+          const curr  = d.current_price;
+          const unaff = d.unaffected_price;
+          const spread = d.spread_to_deal_pct;
+          const premium = (offer != null && unaff != null && unaff > 0) ? ((offer - unaff) / unaff) * 100 : null;
+          const spreadHtml = spread != null
+            ? `<span class="${spread >= 0 ? 'ret-pos' : 'ret-neg'}">${fmtReturn(spread)}</span> <span class="mute">← positive = trading below offer</span>`
+            : null;
+          const premiumHtml = premium != null
+            ? `<span class="${returnClass(premium)}">${fmtReturn(premium)}</span> <span class="mute">over unaffected</span>`
+            : null;
+          const annSrcLabel = {
+            sec_8k_101: 'from 8-K Item 1.01',
+            sec_defa14a: 'from DEFA14A',
+            sec_prem14a: 'from PREM14A',
+            filing_date: 'proxy filing date (approx.)',
+          }[d.announce_date_source] || '';
+          return `<div class="section">
+            <h3>Merger arb</h3>
+            <dl class="kv">
+              ${row('Consideration', d.consideration)}
+              ${row('Offer price', offer != null ? `$${Number(offer).toFixed(2)}` : null)}
+              ${row('Unaffected price', unaff != null ? `$${Number(unaff).toFixed(2)} (1 day pre-announce)` : null)}
+              ${row('Current price', curr != null ? `$${Number(curr).toFixed(2)}` : null)}
+              ${rawRow('Spread to deal', spreadHtml)}
+              ${rawRow('Bid premium', premiumHtml)}
+              ${row('Announce date', d.announce_date ? `${d.announce_date}${annSrcLabel ? ' — ' + annSrcLabel : ''}` : null)}
+              ${row('Deal value (USD)', d.deal_value_usd ? fmtM(d.deal_value_usd) + 'M' : null)}
+            </dl>
+          </div>`;
+        })()}
 
         <div class="section">
           <h3>Parties</h3>
@@ -760,12 +802,28 @@ function returnClass(r) {
 // single return_pct otherwise.
 function returnCell(d) {
   const isSpin = (d.deal_type === 'spin_off') || (d.event_type && d.event_type.startsWith('spin'));
-  const pr = d.parent_return_pct, sr = d.spinco_return_pct;
-  if (isSpin && (pr != null || sr != null)) {
-    const p = pr != null ? `<span class="${returnClass(pr)}" title="Parent (RemainCo) since ex-date">P ${fmtReturn(pr)}</span>` : '<span class="mute">P —</span>';
-    const s = sr != null ? `<span class="${returnClass(sr)}" title="SpinCo since first trade">S ${fmtReturn(sr)}</span>` : '<span class="mute">S —</span>';
-    return `${p} <span class="mute">/</span> ${s}`;
+  const isMerger = (d.deal_type === 'merger_arb') || (d.event_type && d.event_type.startsWith('merger'));
+
+  if (isSpin) {
+    const pr = d.parent_return_pct, sr = d.spinco_return_pct;
+    if (pr != null || sr != null) {
+      const p = pr != null ? `<span class="${returnClass(pr)}" title="Parent (RemainCo) since ex-date">P ${fmtReturn(pr)}</span>` : '<span class="mute">P —</span>';
+      const s = sr != null ? `<span class="${returnClass(sr)}" title="SpinCo since first trade">S ${fmtReturn(sr)}</span>` : '<span class="mute">S —</span>';
+      return `${p} <span class="mute">/</span> ${s}`;
+    }
   }
+
+  if (isMerger) {
+    // For mergers, return_pct is misleading (stale announce_price, no offer context).
+    // Show spread-to-deal instead: positive = trading below offer (arb opportunity).
+    const sp = d.spread_to_deal_pct;
+    if (sp != null) {
+      return `<span class="${sp >= 0 ? 'ret-pos' : 'ret-neg'}" title="Spread to deal: (offer − current) / current">${fmtReturn(sp)} spr</span>`;
+    }
+    // No offer price captured yet — suppress misleading return.
+    return '<span class="mute" title="No offer price yet — spread unavailable">—</span>';
+  }
+
   return `<span class="${returnClass(d.return_pct)}">${fmtReturn(d.return_pct)}</span>`;
 }
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }

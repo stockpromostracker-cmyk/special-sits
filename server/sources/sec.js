@@ -175,15 +175,235 @@ async function fetchIpoPriced({ since } = {}) {
   return hits.map(normaliseHit).map(h => makeDeal(h, 'ipo_recent', 'sec_424b4'));
 }
 
-async function fetchMergerProxies({ since } = {}) {
+async function fetchMergerProxies({ since, enrich = true } = {}) {
   const startdt = since || daysAgo(365);
   const enddt = today();
   const hits = await efts(['DEFM14A', 'PREM14A', 'SC 14D9'], { startdt, enddt });
-  return hits.map(normaliseHit).map(h => {
+  const deals = hits.map(normaliseHit).map(h => {
     const d = makeDeal(h, 'merger_pending', 'sec_defm14a');
     d.summary = `Merger filing ${h.form} on EDGAR ${h.file_date}.`;
+    d.filing_date = h.file_date;
+    d.announce_date_source = 'filing_date';
+    // Preserve the raw filing accession so enrichment can fetch the body
+    d._accession = h.accession;
+    d._form = h.form;
     return d;
   });
+
+  // Enrichment: walk back to real announce date and extract offer terms.
+  // Opt-out via enrich=false for fast / test runs.
+  if (enrich) {
+    // Concurrency: EDGAR's fair-use policy is ~10 req/sec. We stay well under
+    // by limiting to 3 concurrent enrichment tasks — each does 1-2 fetches.
+    await limitedParallel(deals, 3, async (d) => {
+      try { await enrichMergerDeal(d); }
+      catch (e) { /* swallow per-deal enrichment errors; keep base deal */ }
+    });
+  }
+  // Drop internal-only fields before returning to caller.
+  deals.forEach(d => { delete d._accession; delete d._form; });
+  return deals;
+}
+
+// ---- Merger enrichment ---------------------------------------------------
+
+// For a merger deal filed as DEFM14A/PREM14A, walk backwards through the
+// filer's SEC submissions to find the true deal-announcement date. Deal
+// announcements almost always come via either:
+//   1. 8-K Item 1.01 "Entry into a Material Definitive Agreement" (the
+//      merger agreement is an exhibit). This is THE canonical announce date.
+//   2. DEFA14A "Additional Proxy Soliciting Materials" — typically a press
+//      release filed the same day as or shortly after the 8-K.
+// We take the earliest such filing in a 180-day window before the proxy.
+async function findTrueAnnounceDate(cik, beforeDate) {
+  if (!cik) return null;
+  const cikPad = String(cik).padStart(10, '0');
+  const url = `https://data.sec.gov/submissions/CIK${cikPad}.json`;
+  const res = await fetch(url, { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
+  if (!res.ok) return null;
+  const j = await res.json();
+  const recent = j.filings?.recent;
+  if (!recent) return null;
+  const forms = recent.form || [];
+  const dates = recent.filingDate || [];
+  const items = recent.items || []; // 8-K items like "1.01"
+  const cutoffLo = new Date(beforeDate); cutoffLo.setDate(cutoffLo.getDate() - 180);
+  const cutoffHi = new Date(beforeDate); cutoffHi.setDate(cutoffHi.getDate() - 1); // at least 1 day before
+  const cutoffLoS = cutoffLo.toISOString().slice(0,10);
+  const cutoffHiS = cutoffHi.toISOString().slice(0,10);
+
+  const candidates = [];
+  for (let i = 0; i < forms.length; i++) {
+    const f = forms[i]; const dt = dates[i]; const it = items[i] || '';
+    if (!f || !dt) continue;
+    if (dt < cutoffLoS || dt > cutoffHiS) continue;
+    if (f === '8-K' && it.includes('1.01')) candidates.push({ date: dt, source: 'sec_8k_101' });
+    else if (f === 'DEFA14A') candidates.push({ date: dt, source: 'sec_defa14a' });
+  }
+  if (!candidates.length) return null;
+  // Earliest wins — typically the 8-K beats DEFA14A by 0-1 days.
+  candidates.sort((a, b) => a.date.localeCompare(b.date));
+  return candidates[0];
+}
+
+// Heuristic extractor for per-share merger consideration from the primary
+// proxy document. EDGAR filing index lists all attachments; we pick the main
+// .htm (largest HTML file) and regex a size-capped slice of the body.
+//
+// This is deliberately conservative: we'd rather return NULL than a wrong
+// number. Missed extractions show "—" in the UI; wrong ones would mislead arb.
+async function extractOfferTerms(accession, cik) {
+  if (!accession || !cik) return null;
+  const raw = String(accession).replace(/-/g, '');
+  const cikPlain = String(cik).replace(/^0+/, '') || '0';
+  const indexJson = `https://www.sec.gov/Archives/edgar/data/${cikPlain}/${raw}/index.json`;
+
+  let mainDoc = null;
+  try {
+    const r = await fetch(indexJson, { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const items = j.directory?.item || [];
+    // Pick the largest .htm/.html that is NOT an exhibit (ex-XX, ex_) —
+    // the main proxy is typically the first large HTM listed.
+    const htmls = items.filter(it => /\.htm?$/i.test(it.name) && !/^ex[-_]/i.test(it.name) && !/^(R\d+|Financial)/.test(it.name));
+    htmls.sort((a, b) => Number(b.size || 0) - Number(a.size || 0));
+    mainDoc = htmls[0]?.name;
+  } catch { return null; }
+  if (!mainDoc) return null;
+
+  const docUrl = `https://www.sec.gov/Archives/edgar/data/${cikPlain}/${raw}/${mainDoc}`;
+  let html;
+  try {
+    const r = await fetch(docUrl, { headers: { 'User-Agent': UA, 'Accept': 'text/html' } });
+    if (!r.ok) return null;
+    // Merger consideration is almost always discussed in the summary/
+    // "The Merger" section near the top. Cap at 800KB to avoid whole-proxy loads.
+    const buf = await r.arrayBuffer();
+    html = Buffer.from(buf.slice(0, 800_000)).toString('utf8');
+  } catch { return null; }
+
+  // Strip tags, decode common entities (incl. non-breaking space &#160;),
+  // collapse whitespace for easier regex matching.
+  const text = html
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;|&#160;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&#8220;|&#8221;|&ldquo;|&rdquo;/g, '"')
+    .replace(/&#8217;|&#8216;|&rsquo;|&lsquo;/g, "'")
+    .replace(/\s+/g, ' ');
+
+  // Focus on the "merger consideration" vicinity (first 60KB of stripped text).
+  // Patterns observed in real DEFM14As:
+  //   "$X.XX in cash per share"
+  //   "$X.XX per share of Company Common Stock"
+  //   "right to receive $X.XX in cash, without interest"
+  //   "0.14625 shares of K-C common stock plus $3.50 in cash (the merger consideration)"
+  const window = text.slice(0, 60_000);
+
+  // Cash-per-share patterns. Use /g flag + matchAll so we can iterate all matches
+  // and skip par-value noise (first match is often "$0.01 per share" par-value boilerplate).
+  // Order from strictest (highest confidence) → loosest.
+  const cashPatterns = [
+    /(?:right|entitled)\s+to\s+receive\s+\$(\d{1,4}(?:\.\d{1,4})?)\s+in\s+cash(?:,?\s+without\s+interest)?(?:\s+net\s+of)?/gi,
+    /\$(\d{1,4}(?:\.\d{1,4})?)\s+(?:in\s+cash\s+)?per\s+share(?:\s+of\s+(?:common|ordinary|class))?/gi,
+    /(?:a\s+cash\s+payment\s+of|cash\s+consideration\s+of|per-?share\s+merger\s+consideration\s+of)\s+\$(\d{1,4}(?:\.\d{1,4})?)/gi,
+    // bidirectional: merger consideration near $X in cash (either side)
+    /merger\s+consideration[^.]{0,80}?\$(\d{1,4}(?:\.\d{1,4})?)\s+in\s+cash/gi,
+    /\$(\d{1,4}(?:\.\d{1,4})?)\s+in\s+cash[^.]{0,80}?merger\s+consideration/gi,
+    // "plus $X.XX in cash" in merger-consideration context
+    /(?:plus|and)\s+\$(\d{1,4}(?:\.\d{1,4})?)\s+in\s+cash/gi,
+  ];
+
+  const isValidCashMatch = (m, win) => {
+    const v = parseFloat(m[1]);
+    if (!(v >= 0.5 && v < 10_000)) return false;
+    // Reject if "par value" appears in 40 chars before (par-value boilerplate like "$0.01 par value per share")
+    const pre = win.slice(Math.max(0, m.index - 40), m.index);
+    if (/par\s+value/i.test(pre)) return false;
+    // Reject obvious non-per-share dollar amounts (termination fees, aggregate values)
+    const post = win.slice(m.index, Math.min(win.length, m.index + 80));
+    if (/(?:termination\s+fee|billion|million\s*,|aggregate)/i.test(post)) return false;
+    return true;
+  };
+
+  let offerCash = null;
+  outer: for (const p of cashPatterns) {
+    for (const m of window.matchAll(p)) {
+      if (isValidCashMatch(m, window)) { offerCash = parseFloat(m[1]); break outer; }
+    }
+  }
+
+  // Stock exchange ratio pattern:
+  //   "X.XX shares of Parent Common Stock for each share"
+  //   "exchange ratio of X.XX"
+  let stockRatio = null;
+  const stockPatterns = [
+    /(\d+(?:\.\d{1,6})?)\s+shares?\s+of\s+(?:Parent|Acquirer|[A-Z][\w ]{2,40})\s+common\s+stock\s+(?:for\s+each|per)/i,
+    /exchange\s+ratio\s+of\s+(\d+(?:\.\d{1,6})?)/i,
+  ];
+  for (const p of stockPatterns) {
+    const m = window.match(p);
+    if (m) { const v = parseFloat(m[1]); if (v > 0 && v < 1000) { stockRatio = v; break; } }
+  }
+
+  let type = 'unknown';
+  if (offerCash && stockRatio) type = 'mixed';
+  else if (offerCash) type = 'cash';
+  else if (stockRatio) type = 'stock';
+  if (type === 'unknown') return null;
+
+  return {
+    consideration_type: type,
+    consideration_cash: offerCash,
+    consideration_stock_ratio: stockRatio,
+    // For pure-cash deals we can set offer_price directly. Mixed/stock need
+    // an acquirer reference price which we'll resolve in market_data.js.
+    offer_price: type === 'cash' ? offerCash : null,
+  };
+}
+
+async function enrichMergerDeal(d) {
+  const cik = d.source_cik;
+  const prem = d.filing_date || d.announce_date;
+  if (!cik || !prem) return;
+
+  const [announce, terms] = await Promise.all([
+    findTrueAnnounceDate(cik, prem).catch(() => null),
+    extractOfferTerms(d._accession, cik).catch(() => null),
+  ]);
+
+  if (announce) {
+    d.announce_date = announce.date;
+    d.announce_date_source = announce.source;
+    d.key_dates = { ...(d.key_dates || {}), announce_date: announce.date, filing_date: prem };
+  }
+  if (terms) {
+    d.consideration_type = terms.consideration_type;
+    d.consideration_cash = terms.consideration_cash;
+    d.consideration_stock_ratio = terms.consideration_stock_ratio;
+    if (terms.offer_price != null) d.offer_price = terms.offer_price;
+    // Human-readable consideration string for the drawer
+    if (terms.consideration_type === 'cash') d.consideration = `$${terms.consideration_cash.toFixed(2)} cash per share`;
+    else if (terms.consideration_type === 'stock') d.consideration = `${terms.consideration_stock_ratio} shares per share`;
+    else if (terms.consideration_type === 'mixed') d.consideration = `$${terms.consideration_cash.toFixed(2)} cash + ${terms.consideration_stock_ratio} shares per share`;
+  }
+}
+
+// Simple concurrency limiter: runs `fn(item)` over all items with at most
+// `n` concurrent calls in flight. Preserves original order; does not throw.
+async function limitedParallel(items, n, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      try { results[i] = await fn(items[i], i); }
+      catch (e) { results[i] = null; }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, () => worker()));
+  return results;
 }
 
 async function fetchAll({ since } = {}) {

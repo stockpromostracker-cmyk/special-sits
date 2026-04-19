@@ -173,6 +173,14 @@ async function migrate() {
     ['spinco_baseline_price','NUMERIC'],   // SpinCo open/first-trade price (USD)
     ['parent_current_price', 'NUMERIC'],   // Latest parent price in USD
     ['spinco_current_price', 'NUMERIC'],   // Latest spinco price in USD
+    // Merger arb columns -----------------------------------------------
+    ['unaffected_price',     'NUMERIC'],   // Close 1 trading day before announce_date (pre-leak reference)
+    ['spread_to_deal_pct',   'NUMERIC'],   // (offer_price - current_price) / current_price * 100
+    ['consideration_type',   'TEXT'],      // 'cash' | 'stock' | 'mixed' | 'unknown'
+    ['consideration_cash',   'NUMERIC'],   // Per-share cash component in USD
+    ['consideration_stock_ratio', 'NUMERIC'], // Per-share stock exchange ratio (target shares per acquirer share)
+    ['acquirer_proxy_ticker','TEXT'],      // If stock deal, acquirer ticker used to value stock component
+    ['announce_date_source', 'TEXT'],      // 'sec_8k_101' | 'sec_defa14a' | 'sec_prem14a' | 'filing_date' — how we derived announce_date
   ];
   for (const [name, type] of newCols) {
     try {

@@ -223,6 +223,37 @@ async function refreshDeal(deal) {
     }
   }
 
+  // ---- Merger arb specific: unaffected price + spread-to-deal ----
+  // Unaffected price = close on the trading day BEFORE announce_date —
+  // i.e. before the market knew about the deal. This is the true reference
+  // for measuring bid premium.
+  //
+  // Spread-to-deal = (offer_price - current_price) / current_price. Positive
+  // spread means current trades BELOW offer — arb opportunity; negative means
+  // market expects a bump.
+  const isMerger = deal.deal_type === 'merger_arb' ||
+                   (deal.event_type || '').startsWith('merger');
+  if (isMerger) {
+    // Unaffected price: fetch once, when announce_date known and not yet set
+    if (deal.announce_date && !deal.unaffected_price) {
+      // Go back 1 calendar day — fetchHistoricalPrice already finds nearest
+      // trading day, so Monday announce → we'll get Friday close.
+      const unaffDate = new Date(deal.announce_date);
+      unaffDate.setDate(unaffDate.getDate() - 1);
+      const unaffStr = unaffDate.toISOString().slice(0, 10);
+      const hist = await fetchHistoricalPrice(parsed.yahooSymbol, unaffStr);
+      if (hist?.close != null) {
+        updates.unaffected_price = toUsd(hist.close, quote?.currency || 'USD') ?? hist.close;
+      }
+    }
+    // Spread-to-deal: needs both offer_price and current_price
+    const offer = deal.offer_price ?? updates.offer_price;
+    const curr  = updates.current_price ?? deal.current_price;
+    if (offer && curr && curr > 0) {
+      updates.spread_to_deal_pct = ((offer - curr) / curr) * 100;
+    }
+  }
+
   // Build SQL SET clause.
   const set = [];
   const params = [];

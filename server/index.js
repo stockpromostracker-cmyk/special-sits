@@ -214,6 +214,9 @@ app.get('/api/deals', async (req, res, next) => {
     // Normalise the split spin-off returns (stored as NUMERIC → string on PG)
     if (s.parent_return_pct != null) s.parent_return_pct = Number(s.parent_return_pct);
     if (s.spinco_return_pct != null) s.spinco_return_pct = Number(s.spinco_return_pct);
+    if (s.offer_price != null)         s.offer_price = Number(s.offer_price);
+    if (s.unaffected_price != null)    s.unaffected_price = Number(s.unaffected_price);
+    if (s.spread_to_deal_pct != null)  s.spread_to_deal_pct = Number(s.spread_to_deal_pct);
     s.market_cap_bucket = marketCapBucket(s.market_cap_usd);
     s.deal_size_bucket  = dealSizeBucket(s.deal_value_usd);
     // Compact incentive badges for the screener row
@@ -288,7 +291,9 @@ app.get('/api/deals/:id', async (req, res) => {
   // Normalise NUMERIC → number so the client can safely .toFixed() etc.
   for (const k of ['parent_return_pct','spinco_return_pct','parent_baseline_price',
                     'spinco_baseline_price','parent_current_price','spinco_current_price',
-                    'announce_price','current_price','market_cap_usd','deal_value_usd']) {
+                    'announce_price','current_price','market_cap_usd','deal_value_usd',
+                    'offer_price','unaffected_price','spread_to_deal_pct',
+                    'consideration_cash','consideration_stock_ratio']) {
     if (d[k] != null && typeof d[k] === 'string') d[k] = Number(d[k]);
   }
 

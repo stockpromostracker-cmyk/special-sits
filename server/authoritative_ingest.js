@@ -90,6 +90,14 @@ async function upsertDeal(d) {
     days_to_event: d.days_to_event ?? null,
     days_since_event: d.days_since_event ?? null,
     key_dates: serializeJson(d.key_dates || null),
+    // Merger arb layer
+    offer_price: d.offer_price ?? null,
+    consideration: d.consideration || null,
+    consideration_type: d.consideration_type || null,
+    consideration_cash: d.consideration_cash ?? null,
+    consideration_stock_ratio: d.consideration_stock_ratio ?? null,
+    acquirer_proxy_ticker: d.acquirer_proxy_ticker || null,
+    announce_date_source: d.announce_date_source || null,
   };
 
   if (existing.length) {
