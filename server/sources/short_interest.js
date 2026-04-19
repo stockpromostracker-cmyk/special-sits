@@ -433,48 +433,74 @@ async function shortInterestForDeal(deal) {
     }
   }
 
-  // ---- EU/UK: AFM + FCA by fuzzy issuer name ----
-  const issuer = deal.issuer_name || deal.target_name || deal.parent_name;
-  if (issuer) {
+  // ---- EU/UK: AFM + FCA by issuer name ----
+  // Build candidate names: target > issuer > parent. For spin-off deals the
+  // SSR disclosure will be against the SpinCo (new entity), whose name is
+  // usually stored in spinco_name — try that too.
+  const candidates = [
+    deal.target_name, deal.issuer_name, deal.spinco_name, deal.parent_name,
+  ].filter(Boolean);
+  for (const issuer of candidates) {
     const key = normIssuerKey(issuer);
-    if (key && key.length >= 4) {
-      const rows = await query(
-        `SELECT holder_name, issuer_name, as_of_date, position_pct, source
-           FROM short_positions
-          WHERE kind = 'disclosed_position'
-            AND LOWER(issuer_name) LIKE $1
-          ORDER BY as_of_date DESC, position_pct DESC
-          LIMIT 25`,
-        [`%${key}%`]
-      );
-      if (rows.length) {
-        // For each holder, keep only the most recent disclosure.
-        const byHolder = new Map();
-        for (const r of rows) {
-          const k = (r.holder_name || '').toLowerCase();
-          if (!byHolder.has(k) || r.as_of_date > byHolder.get(k).as_of_date) {
-            byHolder.set(k, r);
-          }
-        }
-        const positions = Array.from(byHolder.values())
-          .map(r => ({
-            holder: r.holder_name,
-            issuer: r.issuer_name,
-            pct: Number(r.position_pct),
-            as_of_date: r.as_of_date,
-            source: r.source,
-          }))
-          .sort((a, b) => b.pct - a.pct)
-          .slice(0, 10);
-        const total_pct = +positions.reduce((s, p) => s + (p.pct || 0), 0).toFixed(2);
-        out.eu = {
-          positions,
-          total_pct,
-          top_holder: positions[0] || null,
-          as_of_date: positions.reduce((max, p) => p.as_of_date > max ? p.as_of_date : max, ''),
-        };
+    if (!key || key.length < 4) continue;
+    // Whole-key match against normalized issuer name. We apply the same
+    // normalization on the DB side via regexp_replace so we don't need a
+    // precomputed column. Fall back to strict prefix if the DB doesn't
+    // support the regex.
+    const rows = await query(
+      `SELECT holder_name, issuer_name, as_of_date, position_pct, source
+         FROM short_positions
+        WHERE kind = 'disclosed_position'
+          AND (
+            LOWER(issuer_name) = $1
+            OR LOWER(issuer_name) LIKE $2
+            OR LOWER(issuer_name) LIKE $3
+          )
+        ORDER BY as_of_date DESC, position_pct DESC
+        LIMIT 25`,
+      [key, `${key} %`, `${key}, %`]
+    );
+    if (!rows.length) continue;
+    // Strict JS re-filter: normalized DB issuer must EQUAL the normalized
+    // deal key. Prefix matching is too loose (e.g. "Ashtead" prefixes
+    // "Ashtead Technology" when "Group" has been stripped). SSR disclosures
+    // always use the full registered name, so equality on the stripped
+    // canonical form is the right join.
+    const filtered = rows.filter(r => {
+      const dbKey = normIssuerKey(r.issuer_name);
+      return dbKey === key;
+    });
+    if (!filtered.length) continue;
+    const rowsOut = filtered;
+    // Re-bind variable name used below.
+    rows.length = 0;
+    for (const r of rowsOut) rows.push(r);
+    // For each holder, keep only the most recent disclosure.
+    const byHolder = new Map();
+    for (const r of rows) {
+      const k = (r.holder_name || '').toLowerCase();
+      if (!byHolder.has(k) || r.as_of_date > byHolder.get(k).as_of_date) {
+        byHolder.set(k, r);
       }
     }
+    const positions = Array.from(byHolder.values())
+      .map(r => ({
+        holder: r.holder_name,
+        issuer: r.issuer_name,
+        pct: Number(r.position_pct),
+        as_of_date: r.as_of_date,
+        source: r.source,
+      }))
+      .sort((a, b) => b.pct - a.pct)
+      .slice(0, 10);
+    const total_pct = +positions.reduce((s, p) => s + (p.pct || 0), 0).toFixed(2);
+    out.eu = {
+      positions,
+      total_pct,
+      top_holder: positions[0] || null,
+      as_of_date: positions.reduce((max, p) => p.as_of_date > max ? p.as_of_date : max, ''),
+    };
+    break; // first candidate with hits wins
   }
 
   return out;

@@ -355,42 +355,36 @@ async function buildScreenerShortMaps(dealRows) {
   }
 
   if (keys.length) {
-    // For each key, sum the most recent position_pct per holder. We approximate
-    // with total disclosed sum since holders rarely overlap across the current
-    // snapshot — FCA/AFM only publish "currently" active positions.
-    // Use a single LIKE fan-out: one query per key is simpler and still cheap.
-    // short_positions is currently small (<10k rows), so this is fine.
-    for (const key of keys) {
-      try {
-        const rows = await query(
-          `SELECT SUM(position_pct) AS total_pct
-             FROM (
-               SELECT DISTINCT ON (holder_name, issuer_name) holder_name, issuer_name, position_pct, as_of_date
-                 FROM short_positions
-                WHERE kind = 'disclosed_position'
-                  AND LOWER(issuer_name) LIKE $1
-                ORDER BY holder_name, issuer_name, as_of_date DESC
-             ) t`,
-          [`%${key}%`]
-        );
-        const v = Number(rows[0] && rows[0].total_pct);
-        if (v > 0) eu.set(key, +v.toFixed(2));
-      } catch (e) {
-        // DISTINCT ON is PG-only; SQLite fallback:
-        try {
-          const rows = await query(
-            `SELECT holder_name, MAX(position_pct) AS p
-               FROM short_positions
-              WHERE kind = 'disclosed_position'
-                AND LOWER(issuer_name) LIKE $1
-              GROUP BY holder_name`,
-            [`%${key}%`]
-          );
-          const total = rows.reduce((s, r) => s + (Number(r.p) || 0), 0);
-          if (total > 0) eu.set(key, +total.toFixed(2));
-        } catch (e2) { /* ignore */ }
+    // Pull all disclosed positions in one query, normalize issuer names in
+    // JS, then join against the requested keys by exact-match (not substring)
+    // so "Ashtead Group" doesn't pick up "Ashtead Technology Holdings".
+    // At current scale (<2k disclosed positions) a full scan is fine.
+    try {
+      const rows = await query(
+        `SELECT holder_name, issuer_name, position_pct, as_of_date
+           FROM short_positions
+          WHERE kind = 'disclosed_position'`,
+        []
+      );
+      // Keep the most recent disclosure per (issuer_key, holder) pair.
+      const byKeyHolder = new Map();
+      for (const r of rows) {
+        const k = normIssuerKeyForScreener(r.issuer_name);
+        if (!k) continue;
+        const h = (r.holder_name || '').toLowerCase();
+        const mapKey = `${k}::${h}`;
+        const cur = byKeyHolder.get(mapKey);
+        if (!cur || r.as_of_date > cur.as_of_date) byKeyHolder.set(mapKey, { key: k, pct: Number(r.position_pct) || 0, as_of_date: r.as_of_date });
       }
-    }
+      const totals = new Map();
+      for (const v of byKeyHolder.values()) {
+        totals.set(v.key, (totals.get(v.key) || 0) + v.pct);
+      }
+      const wanted = new Set(keys);
+      for (const [k, v] of totals) {
+        if (wanted.has(k) && v > 0) eu.set(k, +v.toFixed(2));
+      }
+    } catch (e) { console.error('[screener-short:eu]', e.message); }
   }
 
   return { us, eu };
