@@ -68,18 +68,31 @@ async function findFirstTradeDate(yahooSymbol, notBefore) {
 }
 
 // Main reconciliation pass. Returns summary of changes.
-async function reconcileAll({ dryRun = false, limit = 500 } = {}) {
-  const deals = await query(
-    `SELECT id, headline, target_name, target_ticker, parent_ticker, spinco_ticker,
-            deal_type, status, completed_date, announce_date, country, region,
-            primary_ticker, yahoo_symbol
-       FROM deals
-      WHERE (status IN ('announced','pending','rumored') OR completed_date IS NULL)
-        AND deal_type IN ('spin_off','merger_arb','ipo')
-      ORDER BY announce_date DESC NULLS LAST
-      LIMIT $1`,
-    [limit]
-  );
+async function reconcileAll({ dryRun = false, limit = 500, onlyIds = null } = {}) {
+  let deals;
+  if (onlyIds && onlyIds.length) {
+    // Single-deal debug path: bypass status/deal_type filters.
+    const placeholders = onlyIds.map((_, i) => `$${i + 1}`).join(',');
+    deals = await query(
+      `SELECT id, headline, target_name, target_ticker, parent_ticker, spinco_ticker, spinco_name,
+              deal_type, status, completed_date, announce_date, country, region,
+              primary_ticker, yahoo_symbol
+         FROM deals WHERE id IN (${placeholders})`,
+      onlyIds
+    );
+  } else {
+    deals = await query(
+      `SELECT id, headline, target_name, target_ticker, parent_ticker, spinco_ticker, spinco_name,
+              deal_type, status, completed_date, announce_date, country, region,
+              primary_ticker, yahoo_symbol
+         FROM deals
+        WHERE (status IN ('announced','pending','rumored') OR completed_date IS NULL)
+          AND deal_type IN ('spin_off','merger_arb','ipo')
+        ORDER BY announce_date DESC NULLS LAST
+        LIMIT $1`,
+      [limit]
+    );
+  }
 
   const changes = { completed: [], country_fixed: [], skipped: [], errors: 0 };
 
@@ -93,6 +106,7 @@ async function reconcileAll({ dryRun = false, limit = 500 } = {}) {
       // announced a spin-off without tickers but the subsidiary later listed.
       if (d.deal_type === 'spin_off' && !d.completed_date) {
         let yahooSym = null;
+        let probeInfo = null;
         if (d.spinco_ticker) {
           const parsed = parseTicker(d.spinco_ticker);
           if (parsed?.yahooSymbol) yahooSym = parsed.yahooSymbol;
@@ -101,9 +115,14 @@ async function reconcileAll({ dryRun = false, limit = 500 } = {}) {
         if (!yahooSym && d.spinco_name && d.announce_date) {
           const daysOld = (Date.now() - new Date(d.announce_date).getTime()) / 86400000;
           if (daysOld > 7) {
-            const probed = await probeSpinByName(d.spinco_name, d.country || d.region);
-            if (probed) yahooSym = probed.yahooSymbol;
+            probeInfo = await probeSpinByName(d.spinco_name, d.country || d.region);
+            if (probeInfo) yahooSym = probeInfo.yahooSymbol;
+            else changes.skipped.push({ id: d.id, headline: d.headline, reason: 'spinco-name-probe-failed', name: d.spinco_name, hint: d.country || d.region });
+          } else {
+            changes.skipped.push({ id: d.id, headline: d.headline, reason: 'spin-too-recent', days: Math.round(daysOld) });
           }
+        } else if (!yahooSym) {
+          changes.skipped.push({ id: d.id, headline: d.headline, reason: 'spin-no-ticker-and-no-name' });
         }
         if (yahooSym) {
           const firstTrade = await findFirstTradeDate(yahooSym, d.announce_date);
@@ -111,11 +130,19 @@ async function reconcileAll({ dryRun = false, limit = 500 } = {}) {
             changes.completed.push({ id: d.id, ticker: yahooSym, completed_date: firstTrade, headline: d.headline });
             dealDidSomething = true;
             if (!dryRun) {
+              const primaryTickerUpdate = probeInfo ? `${probeInfo.exchangeLabel}:${yahooSym.split('.')[0]}` : null;
               await query(
-                `UPDATE deals SET status = 'completed', completed_date = $1, event_type = 'spin_off_completed', spinco_ticker = COALESCE(spinco_ticker, $3) WHERE id = $2`,
-                [firstTrade, d.id, yahooSym]
+                `UPDATE deals
+                    SET status = 'completed', completed_date = $1, event_type = 'spin_off_completed',
+                        spinco_ticker = COALESCE(spinco_ticker, $3),
+                        yahoo_symbol = COALESCE($4, yahoo_symbol),
+                        primary_ticker = COALESCE($5, primary_ticker)
+                  WHERE id = $2`,
+                [firstTrade, d.id, yahooSym, yahooSym, primaryTickerUpdate]
               );
             }
+          } else {
+            changes.skipped.push({ id: d.id, headline: d.headline, reason: 'no-trade-history', ticker: yahooSym });
           }
         }
       }

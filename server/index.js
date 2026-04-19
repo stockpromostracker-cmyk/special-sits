@@ -398,7 +398,8 @@ app.post('/api/admin/run-reconcile', async (req, res) => {
     const { reconcileAll } = require('./reconcile');
     const dryRun = req.query.dry === '1';
     const limit = Math.min(parseInt(req.query.limit || '500', 10), 2000);
-    const result = await reconcileAll({ dryRun, limit });
+    const onlyIds = req.query.ids ? String(req.query.ids).split(',').map(s => parseInt(s, 10)).filter(Boolean) : null;
+    const result = await reconcileAll({ dryRun, limit, onlyIds });
     res.json({ ok: true, dryRun, ...result });
   } catch (e) {
     console.error('[reconcile]', e);
