@@ -85,17 +85,35 @@ async function reconcileAll({ dryRun = false, limit = 500 } = {}) {
 
   for (const d of deals) {
     try {
+      let dealDidSomething = false;
       // ---- Completion detection for spin-offs ----
-      if (d.deal_type === 'spin_off' && d.spinco_ticker && !d.completed_date) {
-        const parsed = parseTicker(d.spinco_ticker);
-        if (parsed?.yahooSymbol) {
-          const firstTrade = await findFirstTradeDate(parsed.yahooSymbol, d.announce_date);
+      // Attempt spinco_ticker directly; else try to find a listing by probing
+      // exchange-suffix combos of the spinco_name (e.g. 'Coffee Stain Group AB'
+      // → COFFEE-B.ST on Nasdaq Stockholm). This catches cases where the feed
+      // announced a spin-off without tickers but the subsidiary later listed.
+      if (d.deal_type === 'spin_off' && !d.completed_date) {
+        let yahooSym = null;
+        if (d.spinco_ticker) {
+          const parsed = parseTicker(d.spinco_ticker);
+          if (parsed?.yahooSymbol) yahooSym = parsed.yahooSymbol;
+        }
+        // Fallback: probe by name if announce_date > 7 days old and spinco_name exists
+        if (!yahooSym && d.spinco_name && d.announce_date) {
+          const daysOld = (Date.now() - new Date(d.announce_date).getTime()) / 86400000;
+          if (daysOld > 7) {
+            const probed = await probeSpinByName(d.spinco_name, d.country || d.region);
+            if (probed) yahooSym = probed.yahooSymbol;
+          }
+        }
+        if (yahooSym) {
+          const firstTrade = await findFirstTradeDate(yahooSym, d.announce_date);
           if (firstTrade) {
-            changes.completed.push({ id: d.id, ticker: parsed.yahooSymbol, completed_date: firstTrade, headline: d.headline });
+            changes.completed.push({ id: d.id, ticker: yahooSym, completed_date: firstTrade, headline: d.headline });
+            dealDidSomething = true;
             if (!dryRun) {
               await query(
-                `UPDATE deals SET status = 'completed', completed_date = $1, event_type = 'spin_off_completed' WHERE id = $2`,
-                [firstTrade, d.id]
+                `UPDATE deals SET status = 'completed', completed_date = $1, event_type = 'spin_off_completed', spinco_ticker = COALESCE(spinco_ticker, $3) WHERE id = $2`,
+                [firstTrade, d.id, yahooSym]
               );
             }
           }
@@ -110,7 +128,7 @@ async function reconcileAll({ dryRun = false, limit = 500 } = {}) {
       // (Users can still manually mark closed via admin.)
 
       // ---- Country fix: try non-US suffix probe for ambiguous primary tickers ----
-      if ((d.country === 'US' || !d.country) && d.target_name) {
+      if ((d.country === 'US' || !d.country) && d.target_name && !dealDidSomething) {
         // Only probe if the target_ticker is a bare uppercase symbol (no suffix).
         const raw = String(d.target_ticker || '').trim().toUpperCase();
         if (raw && /^[A-Z0-9.\-]{1,8}$/.test(raw) && !raw.includes(':') && !raw.includes('.')) {
@@ -130,6 +148,8 @@ async function reconcileAll({ dryRun = false, limit = 500 } = {}) {
                   [probe.country, region, probe.yahooSymbol, `${probe.exchangeLabel}:${raw}`, d.id]
                 );
               }
+            } else if (!probe) {
+              changes.skipped.push({ id: d.id, headline: d.headline, reason: 'no-probe-match', ticker: raw });
             }
           }
         }
@@ -143,4 +163,60 @@ async function reconcileAll({ dryRun = false, limit = 500 } = {}) {
   return { total: deals.length, ...changes };
 }
 
-module.exports = { reconcileAll, probeNonUsListing, findFirstTradeDate };
+// Probe a spinco by its name. Strategy: generate candidate tickers from the
+// first significant token(s) of the name and try common suffixes. Validate
+// by comparing the returned shortName back to the input.
+//
+// Examples this catches:
+//   'Coffee Stain Group AB' + hint 'SE' → COFFEE-B.ST (Nasdaq Stockholm)
+//   'Asmodee SA' + hint 'FR' → ASM.ST (actually lists in Stockholm)
+async function probeSpinByName(name, countryOrRegionHint) {
+  const nExpected = normalize(name);
+  if (!nExpected) return null;
+  const expectedTokens = nExpected.split(' ').filter(t => t.length > 3);
+  if (!expectedTokens.length) return null;
+
+  // Build candidate bare tickers from the first significant word(s).
+  const firstTok = expectedTokens[0].toUpperCase();
+  const candidates = new Set([firstTok]);
+  if (firstTok.length > 5) candidates.add(firstTok.slice(0, 5));
+  if (firstTok.length > 4) candidates.add(firstTok.slice(0, 4));
+  if (firstTok.length > 3) candidates.add(firstTok.slice(0, 3));
+  // Class-B variants (common in Nordic listings: COFFEE-B.ST, EMBRAC-B.ST)
+  for (const c of Array.from(candidates)) {
+    candidates.add(`${c}-B`);
+  }
+
+  // Prioritize suffixes by country hint if provided.
+  let suffixes = NON_US_SUFFIXES.slice();
+  if (countryOrRegionHint) {
+    const hintMap = {
+      SE: '.ST', Nordic: '.ST', NO: '.OL', DK: '.CO', FI: '.HE', IS: '.IC',
+      NL: '.AS', BE: '.BR', FR: '.PA', DE: '.DE', CH: '.SW', IT: '.MI',
+      ES: '.MC', PT: '.LS', IE: '.IR', AT: '.VI', UK: '.L', GB: '.L',
+      'EU-Continental': '.AS',
+    };
+    const prio = hintMap[countryOrRegionHint];
+    if (prio) suffixes = [prio, ...suffixes.filter(s => s !== prio)];
+  }
+
+  for (const suffix of suffixes) {
+    for (const cand of candidates) {
+      const sym = `${cand}${suffix}`;
+      try {
+        const q = await fetchQuote(sym);
+        if (!q || !q.shortName) continue;
+        const nGot = normalize(q.shortName);
+        const gotTokens = nGot.split(' ').filter(t => t.length > 3);
+        const overlap = expectedTokens.filter(t => gotTokens.includes(t));
+        if (overlap.length >= 1) {
+          const info = inferFromYahooSymbol(sym);
+          if (info) return { yahooSymbol: sym, ...info, matchedName: q.shortName };
+        }
+      } catch (_) { /* try next */ }
+    }
+  }
+  return null;
+}
+
+module.exports = { reconcileAll, probeNonUsListing, probeSpinByName, findFirstTradeDate };
