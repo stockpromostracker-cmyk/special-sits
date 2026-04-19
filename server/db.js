@@ -233,6 +233,37 @@ async function migrate() {
   await query(`CREATE INDEX IF NOT EXISTS idx_insider_tx_date   ON insider_transactions(transaction_date)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_insider_tx_buy    ON insider_transactions(is_buy)`);
 
+  // ---- Short positions (snapshot-style, not trade-event) ------------------
+  // US: FINRA regShoDaily aggregates daily short-sale volume per symbol per
+  //     reporting facility (NCTRF/NQTRF/NYTRF). We store a daily row per
+  //     symbol with short_volume / total_volume -> short_ratio.
+  // NL/UK: Regulator-disclosed net short positions (>=0.5%) by holder.
+  //     One row per (holder, issuer, as_of_date).
+  // A `kind` column discriminates the two shapes so the same table can back
+  // both views without polluting insider_transactions semantics.
+  await query(`CREATE TABLE IF NOT EXISTS short_positions (
+    id ${pkSerial},
+    source TEXT NOT NULL,              -- finra_regsho | afm_short | fca_short
+    kind TEXT NOT NULL,                -- 'daily_volume' | 'disclosed_position'
+    issuer_name TEXT,
+    issuer_country TEXT,
+    issuer_ticker TEXT,                -- normalized EXCHANGE:SYMBOL (US) or ISIN (EU)
+    isin TEXT,
+    holder_name TEXT,                  -- NULL for daily_volume; fund name for disclosed
+    as_of_date TEXT NOT NULL,          -- YYYY-MM-DD
+    short_volume NUMERIC,              -- daily shorted shares (daily_volume)
+    total_volume NUMERIC,              -- daily total reported shares
+    short_ratio NUMERIC,               -- short_volume / total_volume
+    position_pct NUMERIC,              -- % of issued capital (disclosed_position)
+    reporting_facility TEXT,           -- NCTRF|NQTRF|NYTRF (finra only)
+    fetched_at ${ts},
+    UNIQUE(source, kind, issuer_ticker, isin, holder_name, as_of_date, reporting_facility)
+  )`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_short_pos_ticker  ON short_positions(issuer_ticker)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_short_pos_isin    ON short_positions(isin)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_short_pos_date    ON short_positions(as_of_date)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_short_pos_issuer  ON short_positions(issuer_name)`);
+
   await query(`CREATE INDEX IF NOT EXISTS idx_deals_event_type  ON deals(event_type)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_deals_tier        ON deals(data_source_tier)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_deals_filing_date ON deals(filing_date)`);

@@ -309,10 +309,11 @@ async function openDrawer(id) {
   drawer.querySelector('.drawer-close').addEventListener('click', closeDrawer);
 
   try {
-    const [d, inc, rel] = await Promise.all([
+    const [d, inc, rel, own] = await Promise.all([
       api(`/api/deals/${id}`),
       api(`/api/deals/${id}/incentives`).catch(() => null),
       api(`/api/deals/${id}/related`).catch(() => null),
+      api(`/api/deals/${id}/ownership`).catch(() => null),
     ]);
     const kd = d.key_dates && typeof d.key_dates === 'object' ? d.key_dates : {};
     drawer.innerHTML = `
@@ -433,7 +434,7 @@ async function openDrawer(id) {
 
         ${renderRelationshipGraph(rel, d)}
 
-        ${renderOfficialDocLinks(d)}
+        ${renderOwnershipCompSection(d, own)}
 
         <div class="section">
           <h3>Timeline</h3>
@@ -542,9 +543,91 @@ if (!window.__rgGraphWired) {
 }
 
 // -----------------------------------------------------------------
-// Compensation & ownership link-outs. Surface the DEF 14A / proxy URL
-// for US tickers and a Schedule 13D/G search for ownership research.
-function renderOfficialDocLinks(d) {
+// Compensation & ownership — combined DATA + link-outs.
+// Data shown: top insider holders (any market we ingest from) and
+// CEO/NEO compensation (US issuers with SEC XBRL Pay-vs-Performance).
+// Link-outs shown: DEF 14A, 13D/G, Form 3/4 SEC searches (US only).
+function renderOwnershipCompSection(d, own) {
+  const linksHtml = renderOfficialDocLinksInner(d);
+  const ownershipHtml = renderOwnershipTable(own);
+  const compHtml = renderCompensationBlock(own);
+
+  // If absolutely nothing to show (non-US, no insider history), bail.
+  if (!linksHtml && !ownershipHtml && !compHtml) return '';
+
+  return `<div class="section">
+    <h3>Compensation &amp; ownership</h3>
+    <p class="hint-text">Skin-in-the-game: who owns it, how they're paid.</p>
+    ${compHtml}
+    ${ownershipHtml}
+    ${linksHtml}
+  </div>`;
+}
+
+function renderOwnershipTable(own) {
+  if (!own || !own.ownership || !own.ownership.holders || !own.ownership.holders.length) {
+    // For non-US issuers or deals with no insider history, show explanatory copy.
+    if (own && own.ownership && own.ownership.notes && own.ownership.notes.length) {
+      return `<p class="hint-text" style="margin:6px 0 12px">Top holders: <em>${esc(own.ownership.notes[0])}</em></p>`;
+    }
+    return '';
+  }
+  const h = own.ownership.holders;
+  const rows = h.map(r => {
+    const title = [r.insider_title, r.is_ten_percent_owner ? '10%+ owner' : null].filter(Boolean).join(' • ');
+    const activity = r.buy_count_180d || r.sell_count_180d
+      ? `${r.buy_count_180d ? `<span class="tx-buy">${r.buy_count_180d} buy</span>` : ''}${r.buy_count_180d && r.sell_count_180d ? ' / ' : ''}${r.sell_count_180d ? `<span class="tx-sell">${r.sell_count_180d} sell</span>` : ''}`
+      : '<span style="color:var(--muted)">—</span>';
+    const netShares = r.net_shares ? (r.net_shares > 0 ? `+${fmtCompact(r.net_shares)}` : fmtCompact(r.net_shares)) : '—';
+    const netCls = r.net_shares > 0 ? 'tx-buy' : r.net_shares < 0 ? 'tx-sell' : '';
+    return `<tr>
+      <td>${esc(r.insider_name)}</td>
+      <td style="color:var(--muted);font-size:12px">${esc(title || '—')}</td>
+      <td class="td-right ${netCls}">${netShares}</td>
+      <td style="font-size:12px">${activity}</td>
+      <td style="color:var(--muted);font-size:12px">${esc(r.last_date || '—')}</td>
+    </tr>`;
+  }).join('');
+  return `<h4 style="margin:12px 0 6px;font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em">Top insiders (3y net)</h4>
+    <div class="insider-tx-wrap"><table class="insider-tx">
+      <thead><tr><th>Insider</th><th>Title</th><th class="td-right">Net shares (3y)</th><th>180d activity</th><th>Last</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
+
+function renderCompensationBlock(own) {
+  if (!own || !own.compensation || !own.compensation.items || !own.compensation.items.length) return '';
+  const items = own.compensation.items;
+  // Build a per-concept mini-table of the two most recent fiscal years.
+  const allYears = new Set();
+  for (const it of items) for (const y of it.years) allYears.add(y.fy);
+  const fyList = [...allYears].sort((a, b) => b - a).slice(0, 2);
+  if (!fyList.length) return '';
+  const header = `<tr><th>Metric</th>${fyList.map(fy => `<th class="td-right">FY${fy}</th>`).join('')}</tr>`;
+  const rows = items.map(it => {
+    const cells = fyList.map(fy => {
+      const y = it.years.find(x => x.fy === fy);
+      return `<td class="td-right">${y ? fmtUsdCompact(y.val) : '—'}</td>`;
+    }).join('');
+    return `<tr><td>${esc(it.label)}</td>${cells}</tr>`;
+  }).join('');
+  return `<h4 style="margin:12px 0 6px;font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em">Executive compensation (SEC Pay-vs-Performance)</h4>
+    <div class="insider-tx-wrap"><table class="insider-tx">
+      <thead>${header}</thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
+
+function fmtCompact(n) {
+  if (n == null || !isFinite(n)) return '—';
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return (n/1e9).toFixed(2) + 'B';
+  if (abs >= 1e6) return (n/1e6).toFixed(2) + 'M';
+  if (abs >= 1e3) return (n/1e3).toFixed(1) + 'K';
+  return String(Math.round(n));
+}
+
+function renderOfficialDocLinksInner(d) {
   const ticker = d.primary_ticker || d.target_ticker;
   const parentTicker = d.parent_ticker;
   const cik = d.source_cik;
@@ -584,13 +667,10 @@ function renderOfficialDocLinks(d) {
   }
   if (!links.length) return '';
   return `
-    <div class="section">
-      <h3>Compensation &amp; ownership</h3>
-      <p class="hint-text">Skin-in-the-game research: who owns it, how they're paid.</p>
+      <h4 style="margin:12px 0 6px;font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em">Source filings</h4>
       <ul class="doc-links">
         ${links.map(l => `<li><a href="${esc(l.url)}" target="_blank" rel="noopener"><span class="doc-link-label">${l.label} ↗</span><span class="doc-link-hint">${esc(l.hint)}</span></a></li>`).join('')}
-      </ul>
-    </div>`;
+      </ul>`;
 }
 
 function renderIncentiveSection(inc) {
@@ -783,10 +863,29 @@ function externalChartLinks(d) {
 }
 
 // Embed chart(s) for the drawer. For spin-offs, show parent + spinco side-by-side.
+//
+// GUARD: only render a TradingView embed when we have reasonable confidence
+// the symbol actually trades. Pre-listing spin-off tickers (VSNT, VGNT,
+// STRG, etc.) fail TV resolution and show the ugly 'Invalid symbol'
+// placeholder. Rule of thumb: show a chart only when EITHER
+//   - a current_price exists (Yahoo resolved the ticker), OR
+//   - status is completed/closed (deal has printed, ticker is live), OR
+//   - the chart is for the PARENT side of a spin-off (always live)
+// Otherwise fall back to a text link-out to Yahoo/TradingView.
+function isChartableTicker(d, kind) {
+  // Parent tickers are always live companies.
+  if (kind === 'parent') return true;
+  // Completed/closed deals: the ticker exists.
+  if (['completed', 'closed'].includes(d.status)) return true;
+  // Yahoo found it → it trades.
+  if (d.current_price != null && d.current_price > 0) return true;
+  return false;
+}
 function renderChartSection(d) {
   const primaryTv = tvSymbol(d.primary_ticker, d.yahoo_symbol);
   const isSpin = (d.deal_type === 'spin_off') || (d.event_type || '').startsWith('spin');
   const charts = [];
+  const unchartable = []; // ticker+label pairs we skipped → surface as links
   if (isSpin) {
     if (d.parent_ticker) {
       const pTv = tvSymbol(d.parent_ticker, null);
@@ -794,18 +893,37 @@ function renderChartSection(d) {
     }
     if (d.spinco_ticker) {
       const sTv = tvSymbol(d.spinco_ticker, null);
-      if (sTv) charts.push({ sym: sTv, title: `SpinCo · ${d.spinco_name || d.spinco_ticker}` });
+      if (sTv) {
+        if (isChartableTicker(d, 'spinco')) {
+          charts.push({ sym: sTv, title: `SpinCo · ${d.spinco_name || d.spinco_ticker}` });
+        } else {
+          unchartable.push({ tv: sTv, ticker: d.spinco_ticker, label: `SpinCo · ${d.spinco_name || d.spinco_ticker}` });
+        }
+      }
     }
   }
   if (!charts.length && primaryTv) {
-    charts.push({ sym: primaryTv, title: d.primary_ticker || primaryTv });
+    if (isChartableTicker(d, 'primary')) {
+      charts.push({ sym: primaryTv, title: d.primary_ticker || primaryTv });
+    } else {
+      unchartable.push({ tv: primaryTv, ticker: d.primary_ticker, label: d.primary_ticker || primaryTv });
+    }
   }
-  if (!charts.length) return '';
+  // If we have neither a chart nor an unchartable link, bail entirely.
+  if (!charts.length && !unchartable.length) return '';
+  const unchartableHtml = unchartable.length
+    ? `<p class="chart-pending">Chart pending first trading day — <span class="chart-pending-links">${
+        unchartable.map(u =>
+          `<a class="chip chip-link" href="https://www.tradingview.com/symbols/${encodeURIComponent(u.tv.replace(':','-'))}/" target="_blank" rel="noopener">${esc(u.label)} on TradingView ↗</a>`
+        ).join(' ')
+      }</span></p>`
+    : '';
   return `<div class="section chart-section">
     <h3>Price chart</h3>
-    <div class="chart-grid${charts.length > 1 ? ' chart-grid-2' : ''}">
+    ${charts.length ? `<div class="chart-grid${charts.length > 1 ? ' chart-grid-2' : ''}">
       ${charts.map(c => tvMiniChart(c.sym, c.title)).join('')}
-    </div>
+    </div>` : ''}
+    ${unchartableHtml}
   </div>`;
 }
 

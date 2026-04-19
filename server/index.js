@@ -10,6 +10,7 @@ const { refreshAllDeals, refreshDeal } = require('./market_data');
 const { marketCapBucket, dealSizeBucket, COUNTRY_TO_REGION, REGION_HIERARCHY, UI_REGIONS } = require('./tickers');
 const { rollupAll, rollupDeal, listTransactionsForDeal } = require('./incentives');
 const { fetchAllInsider } = require('./insider_feeds');
+const { ownershipAndCompForDeal } = require('./ownership');
 const { runAuthoritativeCycle } = require('./authoritative_ingest');
 
 const app = express();
@@ -600,6 +601,21 @@ app.post('/api/admin/backfill-spin-parents', async (req, res) => {
 // Sibling / relationship graph for a deal.
 // Returns: { self, parent, spinco, siblings }
 // A sibling is another spin_off with the same parent_ticker.
+// Compensation & ownership data (not just links). Aggregates insider
+// holdings from insider_transactions across all markets, and for US issuers
+// fetches Pay-vs-Performance compensation from SEC XBRL.
+app.get('/api/deals/:id/ownership', async (req, res) => {
+  try {
+    const [row] = await query(`SELECT * FROM deals WHERE id = $1`, [req.params.id]);
+    if (!row) return res.status(404).json({ error: 'not found' });
+    const result = await ownershipAndCompForDeal(row);
+    res.json(result);
+  } catch (e) {
+    console.error('[ownership]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/deals/:id/related', async (req, res) => {
   try {
     const [self] = await query(`SELECT * FROM deals WHERE id = $1`, [req.params.id]);
@@ -865,6 +881,212 @@ app.post('/api/admin/deals/:id', requireAdmin, async (req, res) => {
 app.delete('/api/admin/deals/:id', requireAdmin, async (req, res) => {
   await query(`DELETE FROM deals WHERE id = $1`, [req.params.id]);
   res.json({ ok: true });
+});
+
+// ---- Data quality cleanup ------------------------------------------------
+// One-shot hygiene pass that fixes the three most common data-quality bugs:
+//
+//   1. DEDUPE: multiple rows for the same (primary_ticker, deal_type) pair.
+//      Pick the "best" row per group and merge non-null fields from the
+//      siblings into it, then delete the rest. "Best" = most-informative
+//      status (completed > withdrawn > announced > pending), then newest
+//      filing date, then lowest id as tiebreak.
+//
+//   2. STATUS FIX: rows with a past completed_date but status still in
+//      {announced, pending, filed, expected}. Promote to 'completed'.
+//
+//   3. EVENT_TYPE REFRESH: if deal_type=spin_off and status=completed,
+//      ensure event_type=spin_off_completed (same for merger/ipo).
+//
+// Supports ?dry=1 for a read-only preview. Accepts x-ingest-token or
+// x-admin-password.
+app.post('/api/admin/cleanup-deals', async (req, res) => {
+  const ingestOk = INGEST_TOKEN && req.header('x-ingest-token') === INGEST_TOKEN;
+  const adminOk  = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  if (!ingestOk && !adminOk) return res.status(401).json({ error: 'unauthorized' });
+  const dryRun = req.query.dry === '1';
+  try {
+    const all = await query(`SELECT * FROM deals`);
+    const today = new Date().toISOString().slice(0, 10);
+
+    // --- 1. DEDUPE -------------------------------------------------------
+    // Group by (primary_ticker, deal_type). Rows without a primary_ticker
+    // are never merged — too risky.
+    const STATUS_RANK = { completed: 5, withdrawn: 4, closed: 4, announced: 3, pending: 2, filed: 1, expected: 1 };
+    const groups = new Map();
+    for (const d of all) {
+      if (!d.primary_ticker || !d.deal_type) continue;
+      const key = `${d.primary_ticker}::${d.deal_type}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(d);
+    }
+    const dupeGroups = [...groups.entries()].filter(([, v]) => v.length > 1);
+    const mergesPlanned = [];
+    const deletesPlanned = [];
+    for (const [key, rows] of dupeGroups) {
+      // Sort: best status first, then most recent filing_date, then lowest id.
+      const sorted = rows.slice().sort((a, b) => {
+        const sa = STATUS_RANK[a.status] || 0, sb = STATUS_RANK[b.status] || 0;
+        if (sa !== sb) return sb - sa;
+        const fa = a.filing_date || '', fb = b.filing_date || '';
+        if (fa !== fb) return fb.localeCompare(fa);
+        return a.id - b.id;
+      });
+      const keep = sorted[0];
+      const drop = sorted.slice(1);
+      // Merge any non-null fields from drops into keep (only where keep is null/empty).
+      const mergeFields = ['parent_name', 'parent_ticker', 'target_name', 'acquirer_name', 'acquirer_ticker',
+        'spinco_name', 'spinco_ticker', 'deal_value_usd', 'offer_price', 'announce_date',
+        'completed_date', 'filing_date', 'expected_close_date', 'current_price',
+        'source_filing_url', 'source_cik', 'country', 'region', 'summary', 'thesis'];
+      const patch = {};
+      for (const f of mergeFields) {
+        if (keep[f] == null || keep[f] === '') {
+          for (const o of drop) {
+            if (o[f] != null && o[f] !== '') { patch[f] = o[f]; break; }
+          }
+        }
+      }
+      mergesPlanned.push({ key, keep_id: keep.id, drop_ids: drop.map(d => d.id), patch_keys: Object.keys(patch) });
+      deletesPlanned.push(...drop.map(d => d.id));
+      if (!dryRun) {
+        // Apply patch to keeper
+        const keys = Object.keys(patch);
+        if (keys.length) {
+          const sets = keys.map((k, i) => `${k} = $${i + 1}`);
+          await query(`UPDATE deals SET ${sets.join(', ')} WHERE id = $${keys.length + 1}`,
+            [...keys.map(k => patch[k]), keep.id]);
+        }
+        // Delete siblings
+        for (const id of drop.map(d => d.id)) {
+          await query(`DELETE FROM deals WHERE id = $1`, [id]);
+        }
+      }
+    }
+
+    // --- 2. STATUS FIX ---------------------------------------------------
+    // Re-read after dedupe so we don't try to update rows we just deleted.
+    const after = dryRun ? all : await query(`SELECT id, status, deal_type, completed_date, event_type FROM deals`);
+    const statusFixes = [];
+    for (const d of after) {
+      if (!d.completed_date || d.completed_date > today) continue;
+      if (['completed', 'withdrawn', 'closed'].includes(d.status)) continue;
+      // Planned promotion
+      const newStatus = 'completed';
+      let newEventType = d.event_type;
+      if (d.deal_type === 'spin_off') newEventType = 'spin_off_completed';
+      else if (d.deal_type === 'merger_arb') newEventType = 'merger_completed';
+      else if (d.deal_type === 'ipo') newEventType = 'ipo_recent';
+      statusFixes.push({ id: d.id, old_status: d.status, new_status: newStatus, event_type: newEventType });
+      if (!dryRun) {
+        await query(
+          `UPDATE deals SET status = $1, event_type = COALESCE($2, event_type) WHERE id = $3`,
+          [newStatus, newEventType, d.id]
+        );
+      }
+    }
+
+    res.json({
+      ok: true,
+      dryRun,
+      dedupe: {
+        groups_found: dupeGroups.length,
+        rows_deleted: deletesPlanned.length,
+        samples: mergesPlanned.slice(0, 20),
+      },
+      status_fixes: {
+        count: statusFixes.length,
+        samples: statusFixes.slice(0, 20),
+      },
+    });
+  } catch (e) {
+    console.error('[cleanup-deals]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---- 8-K spin-off parent deep-dive backfill ------------------------------
+// Second-pass extractor for the 20 remaining spin_off deals missing
+// parent_name, which are mostly 8-K distribution-notice filings without a
+// full information statement attached. Strategy:
+//   1. Look up related Form 10 / 10-12B filings by the SpinCo's CIK.
+//   2. Run extractSpinParent on those filings.
+//   3. If still nothing, try the issuer's recent DEF 14A (proxy) — the
+//      recital section sometimes names the distributing parent.
+app.post('/api/admin/backfill-spin-parents-deep', async (req, res) => {
+  const ingestOk = INGEST_TOKEN && req.header('x-ingest-token') === INGEST_TOKEN;
+  const adminOk  = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  if (!ingestOk && !adminOk) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const dryRun = req.query.dry === '1';
+    const limit = Math.min(parseInt(req.query.limit || '30', 10), 100);
+    const { extractSpinParent } = require('./sources/sec');
+    const UA = 'SpecialSits Research cfrjacobsson@gmail.com';
+
+    const rows = await query(
+      `SELECT id, headline, primary_ticker, source_cik, source_filing_url,
+              spinco_name, target_name
+         FROM deals
+        WHERE deal_type = 'spin_off'
+          AND (parent_name IS NULL OR parent_ticker IS NULL)
+          AND source_cik IS NOT NULL
+        ORDER BY filing_date DESC NULLS LAST
+        LIMIT $1`, [limit]);
+
+    let scanned = 0, updated = 0, errors = 0;
+    const samples = [];
+    for (const r of rows) {
+      scanned++;
+      const cikPlain = String(r.source_cik).replace(/^0+/, '');
+      try {
+        // Step 1: pull filings index for this CIK, find Form 10 / 10-12B / 10-12B/A.
+        const idxUrl = `https://data.sec.gov/submissions/CIK${String(r.source_cik).padStart(10, '0')}.json`;
+        const idxRes = await fetch(idxUrl, { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
+        if (!idxRes.ok) { errors++; continue; }
+        const idx = await idxRes.json();
+        const recent = idx.filings?.recent;
+        if (!recent || !recent.form) continue;
+        const accList = [];
+        for (let i = 0; i < recent.form.length; i++) {
+          const form = recent.form[i];
+          if (/^(10-12B|10-12B\/A|10|10\/A|DEF 14A|S-1|S-1\/A)$/.test(form)) {
+            accList.push({ form, accession: recent.accessionNumber[i], date: recent.filingDate[i] });
+          }
+        }
+        // Prefer Form 10 families first, then proxies.
+        accList.sort((a, b) => {
+          const rank = (f) => /^10-12B/.test(f) ? 0 : /^10\/?A?$/.test(f) ? 1 : /DEF 14A/.test(f) ? 2 : 3;
+          const ra = rank(a.form), rb = rank(b.form);
+          if (ra !== rb) return ra - rb;
+          return (b.date || '').localeCompare(a.date || '');
+        });
+        const excludeName = r.spinco_name || r.target_name || r.headline || '';
+        let found = null;
+        for (const a of accList.slice(0, 6)) {
+          const p = await extractSpinParent(a.accession, r.source_cik, excludeName);
+          if (p && p.parent_name) { found = { ...p, via_form: a.form, via_acc: a.accession }; break; }
+        }
+        if (!found) continue;
+        if (samples.length < 15) samples.push({ id: r.id, ticker: r.primary_ticker, ...found });
+        if (!dryRun) {
+          const sets = [], vals = [];
+          if (found.parent_name)   { vals.push(found.parent_name);   sets.push(`parent_name = $${vals.length}`); }
+          if (found.parent_ticker) { vals.push(found.parent_ticker); sets.push(`parent_ticker = $${vals.length}`); }
+          if (sets.length) {
+            vals.push(r.id);
+            await query(`UPDATE deals SET ${sets.join(', ')} WHERE id = $${vals.length}`, vals);
+          }
+        }
+        updated++;
+      } catch (e) {
+        errors++;
+      }
+    }
+    res.json({ ok: true, dryRun, scanned, updated, errors, samples });
+  } catch (e) {
+    console.error('[backfill-spin-parents-deep]', e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ---- Authoritative ingest ------------------------------------------------
