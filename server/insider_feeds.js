@@ -7,6 +7,7 @@
 
 const Parser = require('rss-parser');
 const { query } = require('./db');
+const { fetchAfm, fetchSwedenFi } = require('./sources/eu_mar');
 
 const UA = 'SpecialSits Research cfrjacobsson@gmail.com';
 const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -408,15 +409,17 @@ async function saveInsiderTransactions(rows) {
 }
 
 async function fetchAllInsider() {
-  const [us, stakes, uk, nordic] = await Promise.all([
+  const [us, stakes, uk, nordic, nl, se] = await Promise.all([
     fetchSecForm4({ limit: 40 }).catch(e => (console.error('sec form4', e.message), [])),
     fetchSec13dg({ limit: 60 }).catch(e => (console.error('sec 13dg', e.message), [])),
     fetchLseDirectorDealings().catch(e => (console.error('lse rns', e.message), [])),
-    fetchNordicMar().catch(e => (console.error('nordic', e.message), [])),
+    fetchNordicMar().catch(e => (console.error('nordic news-proxy', e.message), [])),
+    fetchAfm({ days: 180 }).catch(e => (console.error('afm nl', e.message), [])),
+    fetchSwedenFi({ days: 60 }).catch(e => (console.error('fi se', e.message), [])),
   ]);
-  const all = [...us, ...stakes, ...uk, ...nordic];
+  const all = [...us, ...stakes, ...uk, ...nordic, ...nl, ...se];
   const inserted = await saveInsiderTransactions(all);
-  console.log(`[insider] fetched ${all.length} (us=${us.length} stakes=${stakes.length} uk=${uk.length} nordic=${nordic.length}), inserted ${inserted}`);
+  console.log(`[insider] fetched ${all.length} (us=${us.length} stakes=${stakes.length} uk=${uk.length} nordic=${nordic.length} nl=${nl.length} se=${se.length}), inserted ${inserted}`);
   return { fetched: all.length, inserted };
 }
 
@@ -428,6 +431,8 @@ module.exports = {
   fetchSec13dg,
   fetchLseDirectorDealings,
   fetchNordicMar,
+  fetchAfm,
+  fetchSwedenFi,
   saveInsiderTransactions,
   KNOWN_ACTIVISTS,
 };
