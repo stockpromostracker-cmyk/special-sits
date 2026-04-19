@@ -359,10 +359,23 @@ async function openDrawer(id) {
 
               if (isSpin && (d.parent_return_pct != null || d.spinco_return_pct != null)) {
                 const pr = d.parent_return_pct, sr = d.spinco_return_pct;
+                // Sanity threshold: for completed spin-offs, a parent/spinco return > 200%
+                // usually means the baseline price is stale or mismatched (e.g. pre-split
+                // parent price used as baseline against post-split current price), not a
+                // real 5x rally. Show a warning rather than a misleading number.
+                const SUSPECT_THRESHOLD = 200; // percent
+                const suspect = (v) => v != null && Math.abs(Number(v)) > SUSPECT_THRESHOLD;
                 const pLabel = `Parent return <span class="kv-hint" title="RemainCo performance since ex-date">ⓘ</span>`;
                 const sLabel = `SpinCo return <span class="kv-hint" title="New entity performance since first trade">ⓘ</span>`;
-                return rawRow(pLabel, pr != null ? `<span class="${returnClass(pr)}">${fmtReturn(pr)}</span>` : null)
-                     + rawRow(sLabel, sr != null ? `<span class="${returnClass(sr)}">${fmtReturn(sr)}</span>` : null);
+                const renderRet = (v) => {
+                  if (v == null) return null;
+                  if (suspect(v)) {
+                    return `<span class="kv-hint" title="Computed return (${fmtReturn(v)}) exceeds sanity threshold — baseline price likely pre-split or stale. Treat as unreliable." style="color:var(--muted);text-decoration:underline dotted">baseline suspect</span>`;
+                  }
+                  return `<span class="${returnClass(v)}">${fmtReturn(v)}</span>`;
+                };
+                return rawRow(pLabel, renderRet(pr))
+                     + rawRow(sLabel, renderRet(sr));
               }
 
               // For mergers, suppress the misleading "return since announce" here.
@@ -373,6 +386,11 @@ async function openDrawer(id) {
               const ap = d.announce_price, cp = d.current_price;
               if (ap == null || cp == null) return '';
               const r = ((cp-ap)/ap)*100;
+              // Same sanity guard for generic return-since-announce (e.g. spin-off parent
+              // whose baseline was captured pre-split).
+              if (Math.abs(r) > 200) {
+                return rawRow('Return since announce', `<span class="kv-hint" title="Computed return (${fmtReturn(r)}) exceeds sanity threshold — baseline price likely stale or pre-split. Treat as unreliable." style="color:var(--muted);text-decoration:underline dotted">baseline suspect</span>`);
+              }
               return rawRow('Return since announce', `<span class="${returnClass(r)}">${fmtReturn(r)}</span>`);
             })()}
             ${row('Refreshed', d.market_refreshed_at ? String(d.market_refreshed_at).slice(0,16) : null)}
@@ -908,33 +926,56 @@ const TV_EXCHANGE_MAP = {
   'TSX': 'TSX', 'TSXV': 'TSXV',
 };
 
+// Client-side ticker correction map (mirror of server TICKER_CORRECTIONS, keeps
+// charts working even for DB rows that haven't been re-ingested yet).
+const CLIENT_TICKER_CORRECTIONS = {
+  'STO:ASMDE-B':  'STO:ASMDEE-B',
+  'STO:ASMDE':    'STO:ASMDEE',
+  'OMX:ASMDE-B':  'STO:ASMDEE-B',
+  'OMX:ASMDE':    'STO:ASMDEE',
+  'ASMDE-B.ST':   'ASMDEE-B.ST',
+  'ASMDE.ST':     'ASMDEE.ST',
+};
+function correctTicker(raw) {
+  if (!raw) return raw;
+  const up = String(raw).toUpperCase();
+  return CLIENT_TICKER_CORRECTIONS[up] || raw;
+}
+
 function tvFromYahoo(yahooSymbol) {
   if (!yahooSymbol) return null;
-  const m = String(yahooSymbol).match(/^([A-Z0-9\-]+)(\.[A-Z]+)?$/i);
+  const corrected = correctTicker(yahooSymbol);
+  const m = String(corrected).match(/^([A-Z0-9\-]+)(\.[A-Z]+)?$/i);
   if (!m) return null;
   const [, base, suffix] = m;
   const sym = base.replace(/-/g, '_');
-  if (!suffix) return `NASDAQ:${sym}`; // bare US ticker — assume Nasdaq (works for most; TV auto-resolves)
+  // Bare symbol (no suffix) — let TradingView auto-resolve the exchange.
+  // Hard-coding NASDAQ: breaks NYSE-listed names (e.g. APTV, HLT) whose mini-chart
+  // then renders "invalid symbol". An unprefixed symbol works for AAPL, APTV, MSFT, etc.
+  if (!suffix) return sym;
   const tvEx = TV_SUFFIX_MAP[suffix.toUpperCase()];
   if (!tvEx) return null;
   return `${tvEx}:${sym}`;
 }
 
 function tvSymbol(primaryTicker, yahooSymbol) {
+  const primary = correctTicker(primaryTicker);
+  const yahoo = correctTicker(yahooSymbol);
   // Priority 1: primary_ticker with an EXCHANGE:SYMBOL form and known exchange.
-  if (primaryTicker && String(primaryTicker).includes(':')) {
-    const [exchange, sym] = String(primaryTicker).split(':');
+  if (primary && String(primary).includes(':')) {
+    const [exchange, sym] = String(primary).split(':');
     if (exchange && sym) {
       const tvEx = TV_EXCHANGE_MAP[exchange] || TV_EXCHANGE_MAP[exchange.toUpperCase()];
       if (tvEx) return `${tvEx}:${sym.replace(/-/g, '_')}`;
     }
   }
   // Priority 2: yahoo_symbol with suffix — convert via TV_SUFFIX_MAP.
-  const fromYahoo = tvFromYahoo(yahooSymbol || primaryTicker);
+  const fromYahoo = tvFromYahoo(yahoo || primary);
   if (fromYahoo) return fromYahoo;
-  // Priority 3: fallback — if primary_ticker has no colon (e.g. bare 'BIRD'), return as-is.
-  if (primaryTicker && !String(primaryTicker).includes(':')) {
-    return `NASDAQ:${String(primaryTicker).replace(/-/g, '_')}`;
+  // Priority 3: fallback — if primary_ticker has no colon (e.g. bare 'BIRD'),
+  // return without an exchange prefix and let TradingView auto-resolve.
+  if (primary && !String(primary).includes(':')) {
+    return String(primary).replace(/-/g, '_');
   }
   return null;
 }
@@ -1487,8 +1528,16 @@ function returnCell(d) {
   if (isSpin) {
     const pr = d.parent_return_pct, sr = d.spinco_return_pct;
     if (pr != null || sr != null) {
-      const p = pr != null ? `<span class="${returnClass(pr)}" title="Parent (RemainCo) since ex-date">P ${fmtReturn(pr)}</span>` : '<span class="mute">P —</span>';
-      const s = sr != null ? `<span class="${returnClass(sr)}" title="SpinCo since first trade">S ${fmtReturn(sr)}</span>` : '<span class="mute">S —</span>';
+      // Flag suspect baseline (>200% return typically = stale / pre-split baseline).
+      const renderLeg = (v, leg, tooltip) => {
+        if (v == null) return `<span class="mute">${leg} —</span>`;
+        if (Math.abs(Number(v)) > 200) {
+          return `<span class="mute" title="${leg} return ${fmtReturn(v)} — baseline price looks stale/pre-split, treat as unreliable">${leg} ?</span>`;
+        }
+        return `<span class="${returnClass(v)}" title="${tooltip}">${leg} ${fmtReturn(v)}</span>`;
+      };
+      const p = renderLeg(pr, 'P', 'Parent (RemainCo) since ex-date');
+      const s = renderLeg(sr, 'S', 'SpinCo since first trade');
       return `${p} <span class="mute">/</span> ${s}`;
     }
   }

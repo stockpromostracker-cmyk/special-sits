@@ -130,12 +130,32 @@ const REGION_HIERARCHY = {
 // Flat list for the UI dropdown, ordered by relevance for special-sits desks.
 const UI_REGIONS = ['US', 'Canada', 'Americas', 'UK', 'Nordic', 'EU-Continental', 'Switzerland', 'Europe', 'Global'];
 
+// Known-bad ticker corrections. The LLM classifier and some press releases
+// occasionally emit incorrect symbols for real listings. Apply before parsing
+// so every downstream lookup (Yahoo, TradingView, short-interest matching) uses
+// the correct symbol.
+//
+// Key is the UPPERCASE raw string exactly as emitted; value is the corrected form.
+// Both "EXCHANGE:SYMBOL" and bare "SYMBOL" variants should be listed when both appear.
+const TICKER_CORRECTIONS = {
+  // Asmodee (Embracer spin-off, Nasdaq Stockholm): real ticker is ASMDEE, not ASMDE.
+  'STO:ASMDE-B':  'STO:ASMDEE-B',
+  'STO:ASMDE':    'STO:ASMDEE',
+  'OMX:ASMDE-B':  'STO:ASMDEE-B',
+  'OMX:ASMDE':    'STO:ASMDEE',
+  'ASMDE-B.ST':   'ASMDEE-B.ST',
+  'ASMDE.ST':     'ASMDEE.ST',
+};
+
 // Parse a raw ticker string emitted by Gemini (or a human) into a normalized form.
 // Returns { exchange, symbol, yahooSymbol, country, countryName, region, label } or null.
 function parseTicker(raw) {
   if (!raw || typeof raw !== 'string') return null;
   let s = raw.trim().toUpperCase();
   if (!s || s === '?' || s === 'NULL' || s === 'N/A' || s === 'TBD') return null;
+
+  // Apply known-bad ticker corrections up front.
+  if (TICKER_CORRECTIONS[s]) s = TICKER_CORRECTIONS[s];
 
   // Form 1: "EXCHANGE:SYMBOL"
   let m = s.match(/^([A-Z][A-Z0-9]*):([A-Z0-9.\-]+)$/);
@@ -272,4 +292,5 @@ module.exports = {
   REGION_HIERARCHY,
   UI_REGIONS,
   EXCHANGES,
+  TICKER_CORRECTIONS,
 };
