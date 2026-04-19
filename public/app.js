@@ -687,14 +687,57 @@ function renderChartSection(d) {
 // Sorted newest-first. Each row carries a tier color.
 function renderEventTimeline(d) {
   const events = [];
+  // Build useful fallback URLs that every pseudo-event can fall back to.
+  const primaryFilingUrl = d.source_filing_url || null;
+  const yahooUrl = d.yahoo_symbol ? `https://finance.yahoo.com/quote/${encodeURIComponent(d.yahoo_symbol)}` : null;
+  const yahooHistUrl = d.yahoo_symbol ? `https://finance.yahoo.com/quote/${encodeURIComponent(d.yahoo_symbol)}/history` : null;
+  const spincoYahoo = d.spinco_ticker ? `https://finance.yahoo.com/quote/${encodeURIComponent(String(d.spinco_ticker).replace(/^[A-Z]+:/, '').replace(/-/g, '-'))}` : null;
+
   // Key deal dates as pseudo-events
-  if (d.announce_date) events.push({ date: d.announce_date, tier: 'official', kind: 'announce', source: d.announce_date_source || 'announced', headline: 'Deal announced', summary: `Announce date${d.announce_date_source ? ' — ' + d.announce_date_source.replace(/_/g, ' ') : ''}`, url: null });
-  if (d.filing_date && d.filing_date !== d.announce_date) events.push({ date: d.filing_date, tier: 'official', kind: 'filing', source: d.primary_source || 'filing', headline: 'Primary filing', summary: null, url: d.source_filing_url });
+  if (d.announce_date) events.push({
+    date: d.announce_date, tier: 'official', kind: 'announce',
+    source: d.announce_date_source || 'announced',
+    headline: 'Deal announced',
+    summary: `Announce date${d.announce_date_source ? ' — ' + d.announce_date_source.replace(/_/g, ' ') : ''}`,
+    url: primaryFilingUrl,
+  });
+  if (d.filing_date && d.filing_date !== d.announce_date) events.push({
+    date: d.filing_date, tier: 'official', kind: 'filing',
+    source: d.primary_source || 'filing',
+    headline: 'Primary filing',
+    summary: null,
+    url: primaryFilingUrl,
+  });
   const kd = d.key_dates && typeof d.key_dates === 'object' ? d.key_dates : {};
-  if (d.ex_date || kd.ex_date) events.push({ date: d.ex_date || kd.ex_date, tier: 'official', kind: 'ex_date', source: 'ex-date', headline: 'Ex-date (shares trade without distribution)', summary: null, url: null });
-  if (kd.first_trade_date) events.push({ date: kd.first_trade_date, tier: 'official', kind: 'first_trade', source: 'first trade', headline: 'First trading day for new entity', summary: null, url: null });
-  if (d.expected_close_date) events.push({ date: d.expected_close_date, tier: 'upcoming', kind: 'expected_close', source: 'expected close', headline: 'Expected close date', summary: null, url: null });
-  if (d.completed_date) events.push({ date: d.completed_date, tier: 'official', kind: 'completed', source: 'completed', headline: 'Deal completed', summary: null, url: null });
+  if (d.ex_date || kd.ex_date) events.push({
+    date: d.ex_date || kd.ex_date, tier: 'official', kind: 'ex_date',
+    source: 'ex-date',
+    headline: 'Ex-date (shares trade without distribution)',
+    summary: null,
+    url: primaryFilingUrl,
+  });
+  if (kd.first_trade_date) events.push({
+    date: kd.first_trade_date, tier: 'official', kind: 'first_trade',
+    source: 'first trade',
+    headline: 'First trading day for new entity',
+    summary: null,
+    url: spincoYahoo || yahooHistUrl,
+  });
+  if (d.expected_close_date) events.push({
+    date: d.expected_close_date, tier: 'upcoming', kind: 'expected_close',
+    source: 'expected close',
+    headline: 'Expected close date',
+    summary: null,
+    url: primaryFilingUrl,
+  });
+  if (d.completed_date) events.push({
+    date: d.completed_date, tier: 'official', kind: 'completed',
+    source: 'completed',
+    headline: d.deal_type === 'spin_off' ? 'Spin-off completed (first trading day)' :
+              d.deal_type === 'ipo' ? 'IPO priced / first trading day' : 'Deal completed',
+    summary: null,
+    url: spincoYahoo || yahooHistUrl,
+  });
 
   // Secondary filings
   if (Array.isArray(d.sources)) {
