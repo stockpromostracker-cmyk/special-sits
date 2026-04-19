@@ -929,12 +929,13 @@ const TV_EXCHANGE_MAP = {
 // Client-side ticker correction map (mirror of server TICKER_CORRECTIONS, keeps
 // charts working even for DB rows that haven't been re-ingested yet).
 const CLIENT_TICKER_CORRECTIONS = {
+  // Asmodee: all ASMDE* variants rewrite to the B-share (the only class that trades).
   'STO:ASMDE-B':  'STO:ASMDEE-B',
-  'STO:ASMDE':    'STO:ASMDEE',
+  'STO:ASMDE':    'STO:ASMDEE-B',
   'OMX:ASMDE-B':  'STO:ASMDEE-B',
-  'OMX:ASMDE':    'STO:ASMDEE',
+  'OMX:ASMDE':    'STO:ASMDEE-B',
   'ASMDE-B.ST':   'ASMDEE-B.ST',
-  'ASMDE.ST':     'ASMDEE.ST',
+  'ASMDE.ST':     'ASMDEE-B.ST',
 };
 function correctTicker(raw) {
   if (!raw) return raw;

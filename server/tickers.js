@@ -138,13 +138,17 @@ const UI_REGIONS = ['US', 'Canada', 'Americas', 'UK', 'Nordic', 'EU-Continental'
 // Key is the UPPERCASE raw string exactly as emitted; value is the corrected form.
 // Both "EXCHANGE:SYMBOL" and bare "SYMBOL" variants should be listed when both appear.
 const TICKER_CORRECTIONS = {
-  // Asmodee (Embracer spin-off, Nasdaq Stockholm): real ticker is ASMDEE, not ASMDE.
+  // Asmodee (Embracer spin-off, Nasdaq Stockholm): the listed share class is
+  // the B-share under ticker ASMDEE_B (TradingView) / ASMDEE-B (Yahoo suffix).
+  // The LLM classifier emits bare "ASMDE" or "ASMDE-B" which both 404 on TV.
+  // Any ASMDE* variant rewrites to the B-share since that is the one that
+  // actually trades.
   'STO:ASMDE-B':  'STO:ASMDEE-B',
-  'STO:ASMDE':    'STO:ASMDEE',
+  'STO:ASMDE':    'STO:ASMDEE-B',
   'OMX:ASMDE-B':  'STO:ASMDEE-B',
-  'OMX:ASMDE':    'STO:ASMDEE',
+  'OMX:ASMDE':    'STO:ASMDEE-B',
   'ASMDE-B.ST':   'ASMDEE-B.ST',
-  'ASMDE.ST':     'ASMDEE.ST',
+  'ASMDE.ST':     'ASMDEE-B.ST',
 };
 
 // Parse a raw ticker string emitted by Gemini (or a human) into a normalized form.
