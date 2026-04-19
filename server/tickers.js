@@ -95,15 +95,40 @@ const COUNTRY_NAMES = {
   IE: 'Ireland', PT: 'Portugal', AT: 'Austria', PL: 'Poland',
 };
 
-// Coarse region groupings used in UI filters.
+// Granular region groupings stored on each deal row. The UI filter expands
+// these hierarchically (e.g. selecting 'Europe' matches Nordic/UK/Switzerland/EU-Continental).
+// See REGION_HIERARCHY below for the expansion logic.
 const COUNTRY_TO_REGION = {
   US: 'US',
+  CA: 'Canada',
   GB: 'UK',
   SE: 'Nordic', DK: 'Nordic', NO: 'Nordic', FI: 'Nordic', IS: 'Nordic',
   CH: 'Switzerland',
-  DE: 'Europe', FR: 'Europe', NL: 'Europe', IT: 'Europe', ES: 'Europe',
-  BE: 'Europe', IE: 'Europe', PT: 'Europe', AT: 'Europe', PL: 'Europe',
+  DE: 'EU-Continental', FR: 'EU-Continental', NL: 'EU-Continental', IT: 'EU-Continental',
+  ES: 'EU-Continental', BE: 'EU-Continental', IE: 'EU-Continental', PT: 'EU-Continental',
+  AT: 'EU-Continental', PL: 'EU-Continental', LU: 'EU-Continental', CZ: 'EU-Continental',
+  HU: 'EU-Continental', GR: 'EU-Continental',
 };
+
+// Nested region hierarchy used by the API filter.
+// When a user selects 'Europe', we match any of [UK, Nordic, Switzerland, EU-Continental, Europe].
+// When they select 'Nordic', we match only Nordic rows.
+const REGION_HIERARCHY = {
+  'US':             ['US'],
+  'Canada':         ['Canada'],
+  'Americas':       ['US', 'Canada'],
+  'UK':             ['UK'],
+  'Nordic':         ['Nordic'],
+  'Switzerland':    ['Switzerland'],
+  'EU-Continental': ['EU-Continental'],
+  // "Europe" broadly includes UK + Nordic + Switzerland + EU-Continental,
+  // plus any legacy rows tagged simply 'Europe'.
+  'Europe':         ['UK', 'Nordic', 'Switzerland', 'EU-Continental', 'Europe'],
+  'Global':         ['Global'],
+};
+
+// Flat list for the UI dropdown, ordered by relevance for special-sits desks.
+const UI_REGIONS = ['US', 'Canada', 'Americas', 'UK', 'Nordic', 'EU-Continental', 'Switzerland', 'Europe', 'Global'];
 
 // Parse a raw ticker string emitted by Gemini (or a human) into a normalized form.
 // Returns { exchange, symbol, yahooSymbol, country, countryName, region, label } or null.
@@ -225,12 +250,26 @@ function dealSizeBucket(usd) {
   return 'small';                      // <$100M
 }
 
+// Given a Yahoo symbol like 'MICC.AS', 'EMBRAC-B.ST', 'MICC' (bare),
+// return the inferred { country, exchangeLabel } from the suffix. Returns null if bare.
+function inferFromYahooSymbol(yahooSymbol) {
+  if (!yahooSymbol || typeof yahooSymbol !== 'string') return null;
+  const m = yahooSymbol.match(/\.(AS|L|ST|CO|HE|OL|IC|SW|VX|DE|F|PA|MI|MC|BR|IR|LS|VI|WA|TO|V|HK|SI|AX)$/i);
+  if (!m) return null;
+  const info = SUFFIX_TO_COUNTRY[`.${m[1].toUpperCase()}`];
+  if (!info) return null;
+  return { country: info.country, exchangeLabel: info.label };
+}
+
 module.exports = {
   parseTicker,
   pickPrimaryTicker,
   marketCapBucket,
   dealSizeBucket,
+  inferFromYahooSymbol,
   COUNTRY_NAMES,
   COUNTRY_TO_REGION,
+  REGION_HIERARCHY,
+  UI_REGIONS,
   EXCHANGES,
 };

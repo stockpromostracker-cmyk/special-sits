@@ -7,7 +7,7 @@ const { runCycle, classifyPending } = require('./ingest');
 const { classify } = require('./classifier');
 const { saveRawItems } = require('./feeds');
 const { refreshAllDeals, refreshDeal } = require('./market_data');
-const { marketCapBucket, dealSizeBucket, COUNTRY_TO_REGION } = require('./tickers');
+const { marketCapBucket, dealSizeBucket, COUNTRY_TO_REGION, REGION_HIERARCHY, UI_REGIONS } = require('./tickers');
 const { rollupAll, rollupDeal, listTransactionsForDeal } = require('./incentives');
 const { fetchAllInsider } = require('./insider_feeds');
 const { runAuthoritativeCycle } = require('./authoritative_ingest');
@@ -153,7 +153,14 @@ app.get('/api/deals', async (req, res, next) => {
   const params = [];
   if (type)   { params.push(type);   where.push(`deal_type = $${params.length}`); }
   if (status) { params.push(status); where.push(`status = $${params.length}`); }
-  if (region) { params.push(region); where.push(`region = $${params.length}`); }
+  // Nested region filter: selecting 'Europe' expands to UK/Nordic/Switzerland/EU-Continental/Europe.
+  if (region) {
+    const expanded = REGION_HIERARCHY[region] || [region];
+    const placeholders = expanded.map(() => { params.push(null); return `$${params.length}`; });
+    // Replace the just-pushed nulls with actual values
+    for (let i = 0; i < expanded.length; i++) params[params.length - expanded.length + i] = expanded[i];
+    where.push(`region IN (${placeholders.join(',')})`);
+  }
   if (country){ params.push(country);where.push(`country = $${params.length}`); }
   if (event_type)       { params.push(event_type);       where.push(`event_type = $${params.length}`); }
   if (data_source_tier) { params.push(data_source_tier); where.push(`data_source_tier = $${params.length}`); }
@@ -377,6 +384,24 @@ app.post('/api/admin/refresh-prices', async (req, res) => {
     res.json({ ok: true, ...result, incentive_rollup: roll });
   } catch (e) {
     console.error('[refresh-prices]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Reconciler: auto-mark completed spin-offs, fix country misclassifications.
+// Safe to run daily — idempotent and conservative.
+app.post('/api/admin/run-reconcile', async (req, res) => {
+  const ingestOk = INGEST_TOKEN && req.header('x-ingest-token') === INGEST_TOKEN;
+  const adminOk  = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  if (!ingestOk && !adminOk) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const { reconcileAll } = require('./reconcile');
+    const dryRun = req.query.dry === '1';
+    const limit = Math.min(parseInt(req.query.limit || '500', 10), 2000);
+    const result = await reconcileAll({ dryRun, limit });
+    res.json({ ok: true, dryRun, ...result });
+  } catch (e) {
+    console.error('[reconcile]', e);
     res.status(500).json({ error: e.message });
   }
 });

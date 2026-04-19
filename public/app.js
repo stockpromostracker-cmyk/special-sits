@@ -18,7 +18,10 @@ const DEAL_TYPES = [
   ['other', 'Other'],
 ];
 const STATUSES = ['rumored', 'announced', 'pending', 'closed', 'terminated'];
-const REGIONS = ['US', 'UK', 'Europe', 'Nordic', 'Switzerland', 'Global'];
+// Region filter options. 'Europe' is a meta-region that expands on the server
+// to match UK + Nordic + Switzerland + EU-Continental. Select a narrower bucket
+// (e.g. 'Nordic') to drill in.
+const REGIONS = ['US', 'Canada', 'Americas', 'UK', 'Nordic', 'EU-Continental', 'Switzerland', 'Europe', 'Global'];
 const COUNTRIES = [
   ['US','🇺🇸 United States'], ['GB','🇬🇧 United Kingdom'],
   ['DE','🇩🇪 Germany'],       ['FR','🇫🇷 France'],
@@ -319,7 +322,9 @@ async function openDrawer(id) {
           ${d.days_to_event != null ? `<span class="date-chip-urgent">in ${d.days_to_event}d</span>` :
             d.days_since_event != null ? `<span class="date-chip-fresh">${d.days_since_event}d ago</span>` : ''}
         </div>
-        ${d.source_filing_url ? `<div class="primary-source"><span class="src-label">Primary source:</span> <a href="${esc(d.source_filing_url)}" target="_blank" rel="noopener">${esc(d.primary_source || 'Filing')} ↗</a></div>` : ''}
+        ${d.source_filing_url ? `<div class="primary-source"><span class="src-label">Primary source:</span> <a href="${esc(d.source_filing_url)}" target="_blank" rel="noopener">${esc(d.primary_source || 'Filing')} ↗</a> ${externalChartLinks(d)}</div>` : ''}
+
+        ${renderChartSection(d)}
 
         ${d.summary ? `<div class="section"><h3>Summary</h3><p>${esc(d.summary)}</p></div>` : ''}
         ${d.thesis ? `<div class="section"><h3>Thesis</h3><p>${esc(d.thesis)}</p></div>` : ''}
@@ -435,17 +440,7 @@ async function openDrawer(id) {
           </dl>
         </div>
 
-        ${renderNewsTimeline(d.news_items)}
-
-        <div class="section">
-          <h3>Other source documents (${d.sources?.length || 0})</h3>
-          ${d.sources?.length ? `<ul class="sources-list">${d.sources.map(s => `
-            <li>
-              <div class="src-source">${esc(s.source)} · ${s.published_at ? esc(String(s.published_at).slice(0,16)) : ''}</div>
-              <div>${esc(s.headline || '')}</div>
-              ${s.url ? `<div style="margin-top:4px"><a href="${esc(s.url)}" target="_blank" rel="noopener">Open source ↗</a></div>` : ''}
-            </li>`).join('')}</ul>` : '<p style="color:var(--muted)">No source documents.</p>'}
-        </div>
+        ${renderEventTimeline(d)}
       </div>
     `;
     drawer.querySelector('.drawer-close').addEventListener('click', closeDrawer);
@@ -555,7 +550,176 @@ function renderIncentiveSection(inc) {
     </div>`;
 }
 
-// News timeline — matched news_items attached to this deal by the orchestrator
+// ---- Chart helpers -------------------------------------------------------
+// Convert a primary_ticker like 'Nasdaq Stockholm:EMBRAC-B' or 'NYSE:BIRD'
+// to a TradingView symbol like 'OMXSTO:EMBRAC_B' / 'NYSE:BIRD'.
+function tvSymbol(primaryTicker, yahooSymbol) {
+  if (!primaryTicker) {
+    if (yahooSymbol) return yahooSymbol.replace(/\.[A-Z]+$/, ''); // best-effort
+    return null;
+  }
+  const [exchange, sym] = primaryTicker.split(':');
+  if (!exchange || !sym) return primaryTicker;
+  const tvExchangeMap = {
+    'NYSE': 'NYSE', 'Nasdaq': 'NASDAQ', 'NYSE Arca': 'NYSE', 'NYSE American': 'AMEX',
+    'LSE': 'LSE', 'AIM': 'LSE',
+    'Nasdaq Stockholm': 'OMXSTO', 'Nasdaq Copenhagen': 'OMXCOP',
+    'Nasdaq Helsinki': 'OMXHEX', 'Oslo B\u00f8rs': 'OSL', 'Nasdaq Iceland': 'OMXICE',
+    'SIX': 'SIX', 'XETRA': 'XETR', 'Frankfurt': 'FWB',
+    'Euronext Paris': 'EURONEXT', 'Euronext Amsterdam': 'EURONEXT',
+    'Euronext Brussels': 'EURONEXT', 'Euronext Dublin': 'EURONEXT', 'Euronext Lisbon': 'EURONEXT',
+    'Borsa Italiana': 'MIL', 'BME Madrid': 'BME', 'Wiener B\u00f6rse': 'WBAG',
+    'GPW Warsaw': 'GPW',
+  };
+  const tvEx = tvExchangeMap[exchange] || exchange.toUpperCase();
+  // TradingView uses underscore for class shares (e.g. EMBRAC_B, BRK_B)
+  return `${tvEx}:${sym.replace(/-/g, '_')}`;
+}
+
+// Render a compact TradingView mini-chart iframe.
+function tvMiniChart(tvSym, title) {
+  if (!tvSym) return '';
+  const cfg = {
+    symbol: tvSym,
+    width: '100%',
+    height: 220,
+    dateRange: '12M',
+    colorTheme: 'dark',
+    isTransparent: true,
+    autosize: false,
+    trendLineColor: 'rgba(41, 98, 255, 1)',
+    underLineColor: 'rgba(41, 98, 255, 0.3)',
+    underLineBottomColor: 'rgba(41, 98, 255, 0)',
+    locale: 'en',
+  };
+  // TradingView embed-widget-mini-symbol-overview takes JSON config via <script>.
+  // Use srcdoc to fully isolate the widget in its own iframe (no top-window JS pollution).
+  const src = `<div class="tradingview-widget-container"><div class="tradingview-widget-container__widget"></div></div><script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-mini-symbol-overview.js" async>${JSON.stringify(cfg)}</script>`;
+  const srcdoc = `<html><body style="margin:0;padding:0;background:transparent">${src}</body></html>`;
+  return `<div class="chart-wrap">
+    <div class="chart-title">${esc(title || tvSym)}</div>
+    <iframe class="tv-mini" sandbox="allow-scripts allow-same-origin allow-popups" srcdoc='${srcdoc.replace(/'/g, "&#39;")}' loading="lazy" style="width:100%;height:220px;border:0;border-radius:8px;"></iframe>
+  </div>`;
+}
+
+// Small pill-link helpers: open the ticker on Yahoo / TradingView / native exchange.
+function externalChartLinks(d) {
+  if (!d) return '';
+  const y = d.yahoo_symbol;
+  const tv = tvSymbol(d.primary_ticker, d.yahoo_symbol);
+  const links = [];
+  if (y)  links.push(`<a class="chip chip-link" href="https://finance.yahoo.com/quote/${encodeURIComponent(y)}" target="_blank" rel="noopener">Yahoo ↗</a>`);
+  if (tv) links.push(`<a class="chip chip-link" href="https://www.tradingview.com/symbols/${encodeURIComponent(tv.replace(':', '-'))}/" target="_blank" rel="noopener">TradingView ↗</a>`);
+  return links.length ? `<span class="ext-links">• ${links.join(' ')}</span>` : '';
+}
+
+// Embed chart(s) for the drawer. For spin-offs, show parent + spinco side-by-side.
+function renderChartSection(d) {
+  const primaryTv = tvSymbol(d.primary_ticker, d.yahoo_symbol);
+  const isSpin = (d.deal_type === 'spin_off') || (d.event_type || '').startsWith('spin');
+  const charts = [];
+  if (isSpin) {
+    if (d.parent_ticker) {
+      const pTv = tvSymbol(d.parent_ticker, null);
+      if (pTv) charts.push({ sym: pTv, title: `Parent · ${d.parent_name || d.parent_ticker}` });
+    }
+    if (d.spinco_ticker) {
+      const sTv = tvSymbol(d.spinco_ticker, null);
+      if (sTv) charts.push({ sym: sTv, title: `SpinCo · ${d.spinco_name || d.spinco_ticker}` });
+    }
+  }
+  if (!charts.length && primaryTv) {
+    charts.push({ sym: primaryTv, title: d.primary_ticker || primaryTv });
+  }
+  if (!charts.length) return '';
+  return `<div class="section chart-section">
+    <h3>Price chart</h3>
+    <div class="chart-grid${charts.length > 1 ? ' chart-grid-2' : ''}">
+      ${charts.map(c => tvMiniChart(c.sym, c.title)).join('')}
+    </div>
+  </div>`;
+}
+
+// ---- Unified event timeline ----------------------------------------------
+// Merges: filing documents (d.sources), news items (d.news_items), and key
+// deal dates (announce_date, filing_date, ex_date, expected_close, completed).
+// Sorted newest-first. Each row carries a tier color.
+function renderEventTimeline(d) {
+  const events = [];
+  // Key deal dates as pseudo-events
+  if (d.announce_date) events.push({ date: d.announce_date, tier: 'official', kind: 'announce', source: d.announce_date_source || 'announced', headline: 'Deal announced', summary: `Announce date${d.announce_date_source ? ' — ' + d.announce_date_source.replace(/_/g, ' ') : ''}`, url: null });
+  if (d.filing_date && d.filing_date !== d.announce_date) events.push({ date: d.filing_date, tier: 'official', kind: 'filing', source: d.primary_source || 'filing', headline: 'Primary filing', summary: null, url: d.source_filing_url });
+  const kd = d.key_dates && typeof d.key_dates === 'object' ? d.key_dates : {};
+  if (d.ex_date || kd.ex_date) events.push({ date: d.ex_date || kd.ex_date, tier: 'official', kind: 'ex_date', source: 'ex-date', headline: 'Ex-date (shares trade without distribution)', summary: null, url: null });
+  if (kd.first_trade_date) events.push({ date: kd.first_trade_date, tier: 'official', kind: 'first_trade', source: 'first trade', headline: 'First trading day for new entity', summary: null, url: null });
+  if (d.expected_close_date) events.push({ date: d.expected_close_date, tier: 'upcoming', kind: 'expected_close', source: 'expected close', headline: 'Expected close date', summary: null, url: null });
+  if (d.completed_date) events.push({ date: d.completed_date, tier: 'official', kind: 'completed', source: 'completed', headline: 'Deal completed', summary: null, url: null });
+
+  // Secondary filings
+  if (Array.isArray(d.sources)) {
+    for (const s of d.sources) {
+      events.push({
+        date: s.published_at ? String(s.published_at).slice(0, 10) : null,
+        tier: 'official', kind: 'filing',
+        source: s.source || 'filing',
+        headline: s.headline || '(filing)',
+        summary: null,
+        url: s.url,
+      });
+    }
+  }
+
+  // News
+  if (Array.isArray(d.news_items)) {
+    for (const n of d.news_items) {
+      events.push({
+        date: n.published_at ? String(n.published_at).slice(0, 10) : null,
+        tier: 'news', kind: 'news',
+        source: n.source || 'news',
+        headline: n.headline || '',
+        summary: n.summary ? n.summary.slice(0, 200) : null,
+        url: n.url,
+        matchKind: n.match_kind,
+      });
+    }
+  }
+
+  if (!events.length) return '';
+
+  // Sort newest-first; events without a date sink to the bottom
+  events.sort((a, b) => {
+    if (!a.date && !b.date) return 0;
+    if (!a.date) return 1;
+    if (!b.date) return -1;
+    return b.date.localeCompare(a.date);
+  });
+
+  const tierIcon = { official: '📄', upcoming: '⏳', news: '📰' };
+  const tierCls  = { official: 'ev-official', upcoming: 'ev-upcoming', news: 'ev-news' };
+
+  return `<div class="section timeline-section">
+    <h3>Deal timeline <span class="section-count">${events.length}</span></h3>
+    <p class="section-hint">Filings, key dates, and related news merged chronologically. Filings and key dates are source-of-truth; news items are enrichment only.</p>
+    <ol class="event-timeline">
+      ${events.map(e => `
+        <li class="event-item ${tierCls[e.tier] || ''}">
+          <div class="event-marker">${tierIcon[e.tier] || '•'}</div>
+          <div class="event-body">
+            <div class="event-meta">
+              <span class="event-date mono">${e.date ? esc(e.date) : '—'}</span>
+              <span class="event-source">${esc(e.source)}</span>
+              ${e.matchKind ? `<span class="event-match mute">via ${esc(e.matchKind.replace('_', ' '))}</span>` : ''}
+            </div>
+            <div class="event-headline">${esc(e.headline)}</div>
+            ${e.summary ? `<div class="event-summary mute">${esc(e.summary)}${e.summary.length >= 200 ? '…' : ''}</div>` : ''}
+            ${e.url ? `<a class="event-link" href="${esc(e.url)}" target="_blank" rel="noopener">Open ↗</a>` : ''}
+          </div>
+        </li>`).join('')}
+    </ol>
+  </div>`;
+}
+
+// News timeline — legacy helper, kept for fallback but no longer used by drawer.
 function renderNewsTimeline(items) {
   if (!Array.isArray(items) || !items.length) return '';
   return `
