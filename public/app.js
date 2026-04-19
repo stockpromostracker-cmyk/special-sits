@@ -349,6 +349,7 @@ async function openDrawer(id) {
             ${row('Sector', d.sector)}
             ${row('Industry', d.industry)}
             ${row('Market cap', fmtMcap(d.market_cap_usd))}
+            ${d.currency && d.currency !== 'USD' ? row('Native currency', `${d.currency} — prices shown below are converted to USD`) : ''}
             ${(() => {
               // Use rawRow so the fmtPrice tooltip HTML is preserved (row() escapes).
               const rr = (label, html) => html != null ? `<dt>${label}</dt><dd>${html}</dd>` : '';
