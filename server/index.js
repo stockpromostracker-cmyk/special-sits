@@ -506,6 +506,36 @@ app.post('/api/ingest/run', requireIngestToken, async (_req, res) => {
   }
 });
 
+// One-shot migration: wipe price fields that were stored in native currency
+// before the FX-normalisation fix (April 2026). Previously, quotes returning
+// currency 'GBp' fell through to `quote.price ?? null` because FX_CACHE had
+// no key for lowercase 'GBp' (only 'GBX'). That stored UK pence as if they
+// were USD. The fix in market_data.js now normalises currency codes and
+// returns null rather than falling back \u2014 but existing rows must be
+// cleared so the next refresh re-populates them correctly.
+app.post('/api/admin/migrate-fx', async (req, res) => {
+  const adminOk = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  const ingestOk = INGEST_TOKEN && req.header('x-ingest-token') === INGEST_TOKEN;
+  if (!adminOk && !ingestOk) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    // Null out prices on any non-USD deal so they get re-fetched & converted.
+    // Also null offer_price where it is a number but the deal is non-USD and
+    // offer_price_converted is not set \u2014 those are native-currency offers
+    // waiting to be converted by the next refreshDeal() call.
+    const r1 = await query(
+      `UPDATE deals SET announce_price = NULL, current_price = NULL,
+                        parent_baseline_price = NULL, parent_current_price = NULL,
+                        spinco_baseline_price = NULL, spinco_current_price = NULL,
+                        unaffected_price = NULL
+         WHERE currency IS NOT NULL AND currency <> 'USD'`, []
+    );
+    res.json({ ok: true, note: 'price fields cleared for non-USD deals; run refresh-prices to re-populate' });
+  } catch (e) {
+    console.error('[migrate-fx]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Refresh market data (prices + mcap + FX) for all active deals.
 // Accepts EITHER x-ingest-token (for the cron) OR x-admin-password (for manual UI).
 app.post('/api/admin/refresh-prices', async (req, res) => {

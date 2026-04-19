@@ -43,6 +43,21 @@ const FX_TO_USD_DEFAULT = {
   PLN: 0.25,
 };
 
+// Yahoo returns a few currency codes in non-standard casings (notably 'GBp' for
+// UK pence, occasionally 'ILa' for Israeli agorot, 'ZAc' for SA cents). This
+// normalises to the upper-case ISO-4217-ish key we use in FX_CACHE.
+function normalizeCurrency(raw) {
+  if (!raw) return 'USD';
+  const s = String(raw);
+  // Yahoo returns 'GBp' (lowercase p) for UK pence. 'GBX' is the alternative
+  // ticker-style code some feeds use. Treat both as pence.
+  if (s === 'GBp' || s.toUpperCase() === 'GBX') return 'GBX';
+  // ZAc (South African cents), ILa (Israeli agorot) — very rare minor units.
+  if (s === 'ZAc') return 'ZAR';  // accept as rand; we don't scale (no deals)
+  if (s === 'ILa') return 'ILS';
+  return s.toUpperCase();
+}
+
 let FX_CACHE = { ...FX_TO_USD_DEFAULT, _refreshedAt: 0 };
 
 async function refreshFx() {
@@ -71,8 +86,17 @@ async function refreshFx() {
 
 function toUsd(amount, currency) {
   if (amount == null) return null;
-  const rate = FX_CACHE[currency];
-  if (rate == null) return null;
+  const key = normalizeCurrency(currency);
+  const rate = FX_CACHE[key];
+  if (rate == null) {
+    // Log once per unknown currency so we notice gaps in the FX table.
+    if (!toUsd._warned) toUsd._warned = new Set();
+    if (!toUsd._warned.has(key)) {
+      console.warn(`[market_data] no FX rate for currency "${currency}" (normalized "${key}") \u2014 returning null`);
+      toUsd._warned.add(key);
+    }
+    return null;
+  }
   return Number(amount) * rate;
 }
 
@@ -164,18 +188,42 @@ async function refreshDeal(deal) {
     country:        parsed.country,
   };
   if (quote) {
-    updates.current_price  = quote.priceUsd ?? quote.price ?? null;
+    // CRITICAL: only fall back to native price if FX conversion actually
+    // failed. For unknown currencies priceUsd is null and falling back would
+    // mix units (e.g. UK pence into a USD column). Previously we used
+    // `priceUsd ?? price` which silently stored pence as USD for GBp listings.
+    updates.current_price  = quote.priceUsd != null ? quote.priceUsd : null;
     updates.market_cap_usd = quote.marketCapUsd ?? null;
     updates.currency       = quote.currency;
     if (quote.sector && !deal.sector)     updates.sector   = quote.sector;
     if (quote.industry && !deal.industry) updates.industry = quote.industry;
+
+    // Convert LLM-extracted offer_price from native currency to USD the
+    // first time we see it (or every refresh if we haven't recorded an
+    // offer_currency yet \u2014 keeps behaviour idempotent once converted).
+    // The LLM sees raw headlines like "recommended offer of 61p per share"
+    // and returns `61`; the quote's native currency is the best proxy for
+    // the offer's currency since the target lists there.
+    if (deal.offer_price != null && deal.offer_price_converted !== 1) {
+      const offerUsd = toUsd(deal.offer_price, quote.currency || 'USD');
+      if (offerUsd != null && offerUsd !== Number(deal.offer_price)) {
+        updates.offer_price = offerUsd;
+        updates.offer_price_converted = 1;
+      } else if (offerUsd != null && offerUsd === Number(deal.offer_price)) {
+        // Already USD \u2014 just mark as converted so we don't re-process.
+        updates.offer_price_converted = 1;
+      }
+    }
   }
 
   // Populate announce_price once, if we have an announce_date.
   if (!deal.announce_price && deal.announce_date) {
     const hist = await fetchHistoricalPrice(parsed.yahooSymbol, deal.announce_date);
     if (hist?.close != null) {
-      updates.announce_price = toUsd(hist.close, quote?.currency || 'USD') ?? hist.close;
+      // Require successful FX conversion; if unknown currency, leave null
+      // rather than mixing units. The `?? hist.close` fallback used to stamp
+      // UK pence into the USD column \u2014 see FX fix April 2026.
+      updates.announce_price = toUsd(hist.close, quote?.currency || 'USD');
     }
   }
 
@@ -194,7 +242,7 @@ async function refreshDeal(deal) {
         if (exDate && !deal.parent_baseline_price) {
           const ph = await fetchHistoricalPrice(parentParsed.yahooSymbol, exDate);
           if (ph?.close != null) {
-            updates.parent_baseline_price = toUsd(ph.close, pq.currency || 'USD') ?? ph.close;
+            updates.parent_baseline_price = toUsd(ph.close, pq.currency || 'USD');
           }
         }
         const base = updates.parent_baseline_price ?? deal.parent_baseline_price;
@@ -212,7 +260,7 @@ async function refreshDeal(deal) {
         if (exDate && !deal.spinco_baseline_price) {
           const sh = await fetchHistoricalPrice(spincoParsed.yahooSymbol, exDate);
           if (sh?.close != null) {
-            updates.spinco_baseline_price = toUsd(sh.close, sq.currency || 'USD') ?? sh.close;
+            updates.spinco_baseline_price = toUsd(sh.close, sq.currency || 'USD');
           }
         }
         const base = updates.spinco_baseline_price ?? deal.spinco_baseline_price;
@@ -243,14 +291,25 @@ async function refreshDeal(deal) {
       const unaffStr = unaffDate.toISOString().slice(0, 10);
       const hist = await fetchHistoricalPrice(parsed.yahooSymbol, unaffStr);
       if (hist?.close != null) {
-        updates.unaffected_price = toUsd(hist.close, quote?.currency || 'USD') ?? hist.close;
+        updates.unaffected_price = toUsd(hist.close, quote?.currency || 'USD');
       }
     }
     // Spread-to-deal: needs both offer_price and current_price
-    const offer = deal.offer_price ?? updates.offer_price;
+    // Use the post-conversion USD values if present in updates (for offer_price
+    // we may have just converted from native currency).
+    const offer = updates.offer_price ?? deal.offer_price;
     const curr  = updates.current_price ?? deal.current_price;
     if (offer && curr && curr > 0) {
-      updates.spread_to_deal_pct = ((offer - curr) / curr) * 100;
+      const spread = ((offer - curr) / curr) * 100;
+      // Sanity guard: an arb spread >300% or <-80% is almost certainly bad data
+      // (wrong ticker, stale quote, inverted fields). Don't poison the DB with
+      // the nonsense number \u2014 leave spread null so the UI hides it.
+      if (Math.abs(spread) <= 300) {
+        updates.spread_to_deal_pct = spread;
+      } else {
+        updates.spread_to_deal_pct = null;
+        console.warn(`[market_data] deal ${deal.id} ${deal.primary_ticker}: spread ${spread.toFixed(1)}% out of range (offer=${offer}, curr=${curr}) \u2014 nulled`);
+      }
     }
   }
 

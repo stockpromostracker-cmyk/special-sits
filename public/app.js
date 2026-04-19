@@ -349,8 +349,12 @@ async function openDrawer(id) {
             ${row('Sector', d.sector)}
             ${row('Industry', d.industry)}
             ${row('Market cap', fmtMcap(d.market_cap_usd))}
-            ${row('Announce price', d.announce_price != null ? `$${Number(d.announce_price).toFixed(2)}` : null)}
-            ${row('Current price', d.current_price != null ? `$${Number(d.current_price).toFixed(2)}` : null)}
+            ${(() => {
+              // Use rawRow so the fmtPrice tooltip HTML is preserved (row() escapes).
+              const rr = (label, html) => html != null ? `<dt>${label}</dt><dd>${html}</dd>` : '';
+              return rr('Announce price', fmtPrice(d.announce_price, d))
+                   + rr('Current price',  fmtPrice(d.current_price,  d));
+            })()}
             ${(() => {
               const isSpin = (d.deal_type === 'spin_off') || (d.event_type && d.event_type.startsWith('spin'));
               const isMerger = (d.deal_type === 'merger_arb') || (d.event_type && d.event_type.startsWith('merger'));
@@ -440,7 +444,7 @@ async function openDrawer(id) {
             const rows = [
               row('Announce date', d.announce_date),
               row('Expected listing', d.expected_close_date),
-              row('Offer price', d.offer_price != null ? `$${Number(d.offer_price).toFixed(2)}` : null),
+              (d.offer_price != null ? `<dt>Offer price</dt><dd>${fmtPrice(d.offer_price, d)}</dd>` : ''),
               row('Deal value (USD)', d.deal_value_usd ? fmtM(d.deal_value_usd) + 'M' : null),
               row('Status', d.status),
             ].filter(Boolean).join('');
@@ -455,7 +459,7 @@ async function openDrawer(id) {
             if (!hasAny) return '';
             return `<div class="section"><h3>Deal terms</h3><dl class="kv">
               ${row('Consideration', d.consideration)}
-              ${row('Offer price', d.offer_price != null ? `$${Number(d.offer_price).toFixed(2)}` : null)}
+              ${d.offer_price != null ? `<dt>Offer price</dt><dd>${fmtPrice(d.offer_price, d)}</dd>` : ''}
               ${row('Deal value (USD)', d.deal_value_usd ? fmtM(d.deal_value_usd) + 'M' : null)}
               ${row('Current spread', d.spread_pct != null ? d.spread_pct + '%' : null)}
             </dl></div>`;
@@ -483,9 +487,9 @@ async function openDrawer(id) {
             <h3>Merger arb</h3>
             <dl class="kv">
               ${row('Consideration', d.consideration)}
-              ${row('Offer price', offer != null ? `$${Number(offer).toFixed(2)}` : null)}
-              ${row('Unaffected price', unaff != null ? `$${Number(unaff).toFixed(2)} (1 day pre-announce)` : null)}
-              ${row('Current price', curr != null ? `$${Number(curr).toFixed(2)}` : null)}
+              ${offer != null ? `<dt>Offer price</dt><dd>${fmtPrice(offer, d)}</dd>` : ''}
+              ${unaff != null ? `<dt>Unaffected price</dt><dd>${fmtPrice(unaff, d)} <span class="mute">(1 day pre-announce)</span></dd>` : ''}
+              ${curr != null ? `<dt>Current price</dt><dd>${fmtPrice(curr, d)}</dd>` : ''}
               ${rawRow('Spread to deal', spreadHtml)}
               ${rawRow('Bid premium', premiumHtml)}
               ${row('Announce date', d.announce_date ? `${d.announce_date}${annSrcLabel ? ' — ' + annSrcLabel : ''}` : null)}
@@ -1549,6 +1553,21 @@ function countryBadge(d) {
   return d.region ? `<span class="badge badge-region">${esc(d.region)}</span>` : '';
 }
 function fmtM(n) { return (Number(n) / 1_000_000).toLocaleString(undefined, { maximumFractionDigits: 0 }); }
+// Render a per-share price in USD. All price fields on `deal` are already
+// normalised to USD server-side (see server/market_data.js toUsd()), so this
+// helper just adds a "Converted from <ccy>" tooltip for non-USD listings so
+// users know they are looking at a converted figure, not a native one.
+function fmtPrice(value, deal) {
+  if (value == null) return null;
+  const v = Number(value);
+  if (!isFinite(v)) return null;
+  const ccy = deal && deal.currency;
+  const formatted = `$${v.toFixed(2)}`;
+  if (ccy && ccy !== 'USD') {
+    return `<span title="Converted to USD from ${esc(ccy)} at the latest FX rate">${formatted} <span class="mute">USD</span></span>`;
+  }
+  return formatted;
+}
 function fmtMcap(n) {
   if (n == null) return '—';
   const v = Number(n);
