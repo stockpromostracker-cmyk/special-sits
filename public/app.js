@@ -551,29 +551,67 @@ function renderIncentiveSection(inc) {
 }
 
 // ---- Chart helpers -------------------------------------------------------
-// Convert a primary_ticker like 'Nasdaq Stockholm:EMBRAC-B' or 'NYSE:BIRD'
-// to a TradingView symbol like 'OMXSTO:EMBRAC_B' / 'NYSE:BIRD'.
+// Convert any of these inputs to a TradingView symbol:
+//   'Nasdaq Stockholm:EMBRAC-B'  -> OMXSTO:EMBRAC_B
+//   'NYSE:BIRD'                  -> NYSE:BIRD
+//   'STO:EMBRAC-B'               -> OMXSTO:EMBRAC_B   (short-form exchange alias)
+//   'COFFEE-B.ST'                -> OMXSTO:COFFEE_B   (Yahoo-suffix form)
+//   'MICC.AS'                    -> EURONEXT:MICC
+const TV_SUFFIX_MAP = {
+  '.ST': 'OMXSTO', '.CO': 'OMXCOP', '.HE': 'OMXHEX', '.OL': 'OSL', '.IC': 'OMXICE',
+  '.L': 'LSE', '.AS': 'EURONEXT', '.PA': 'EURONEXT', '.BR': 'EURONEXT', '.LS': 'EURONEXT',
+  '.IR': 'EURONEXT', '.DE': 'XETR', '.SW': 'SIX', '.MI': 'MIL', '.MC': 'BME',
+  '.VI': 'WBAG', '.WA': 'GPW', '.TO': 'TSX', '.V': 'TSXV',
+};
+const TV_EXCHANGE_MAP = {
+  'NYSE': 'NYSE', 'Nasdaq': 'NASDAQ', 'NASDAQ': 'NASDAQ',
+  'NYSE Arca': 'NYSE', 'NYSE American': 'AMEX', 'AMEX': 'AMEX',
+  'LSE': 'LSE', 'AIM': 'LSE', 'L': 'LSE',
+  'Nasdaq Stockholm': 'OMXSTO', 'STO': 'OMXSTO', 'OMXSTO': 'OMXSTO',
+  'Nasdaq Copenhagen': 'OMXCOP', 'CPH': 'OMXCOP', 'OMXCOP': 'OMXCOP',
+  'Nasdaq Helsinki': 'OMXHEX', 'HEL': 'OMXHEX', 'OMXHEX': 'OMXHEX',
+  'Oslo B\u00f8rs': 'OSL', 'Oslo Bors': 'OSL', 'OSL': 'OSL',
+  'Nasdaq Iceland': 'OMXICE', 'OMXICE': 'OMXICE',
+  'SIX': 'SIX', 'XETRA': 'XETR', 'XETR': 'XETR', 'Frankfurt': 'FWB', 'FWB': 'FWB',
+  'Euronext Paris': 'EURONEXT', 'Euronext Amsterdam': 'EURONEXT',
+  'Euronext Brussels': 'EURONEXT', 'Euronext Dublin': 'EURONEXT', 'Euronext Lisbon': 'EURONEXT',
+  'EURONEXT': 'EURONEXT',
+  'Borsa Italiana': 'MIL', 'MIL': 'MIL',
+  'BME Madrid': 'BME', 'BME': 'BME',
+  'Wiener B\u00f6rse': 'WBAG', 'WBAG': 'WBAG',
+  'GPW Warsaw': 'GPW', 'GPW': 'GPW',
+  'TSX': 'TSX', 'TSXV': 'TSXV',
+};
+
+function tvFromYahoo(yahooSymbol) {
+  if (!yahooSymbol) return null;
+  const m = String(yahooSymbol).match(/^([A-Z0-9\-]+)(\.[A-Z]+)?$/i);
+  if (!m) return null;
+  const [, base, suffix] = m;
+  const sym = base.replace(/-/g, '_');
+  if (!suffix) return `NASDAQ:${sym}`; // bare US ticker — assume Nasdaq (works for most; TV auto-resolves)
+  const tvEx = TV_SUFFIX_MAP[suffix.toUpperCase()];
+  if (!tvEx) return null;
+  return `${tvEx}:${sym}`;
+}
+
 function tvSymbol(primaryTicker, yahooSymbol) {
-  if (!primaryTicker) {
-    if (yahooSymbol) return yahooSymbol.replace(/\.[A-Z]+$/, ''); // best-effort
-    return null;
+  // Priority 1: primary_ticker with an EXCHANGE:SYMBOL form and known exchange.
+  if (primaryTicker && String(primaryTicker).includes(':')) {
+    const [exchange, sym] = String(primaryTicker).split(':');
+    if (exchange && sym) {
+      const tvEx = TV_EXCHANGE_MAP[exchange] || TV_EXCHANGE_MAP[exchange.toUpperCase()];
+      if (tvEx) return `${tvEx}:${sym.replace(/-/g, '_')}`;
+    }
   }
-  const [exchange, sym] = primaryTicker.split(':');
-  if (!exchange || !sym) return primaryTicker;
-  const tvExchangeMap = {
-    'NYSE': 'NYSE', 'Nasdaq': 'NASDAQ', 'NYSE Arca': 'NYSE', 'NYSE American': 'AMEX',
-    'LSE': 'LSE', 'AIM': 'LSE',
-    'Nasdaq Stockholm': 'OMXSTO', 'Nasdaq Copenhagen': 'OMXCOP',
-    'Nasdaq Helsinki': 'OMXHEX', 'Oslo B\u00f8rs': 'OSL', 'Nasdaq Iceland': 'OMXICE',
-    'SIX': 'SIX', 'XETRA': 'XETR', 'Frankfurt': 'FWB',
-    'Euronext Paris': 'EURONEXT', 'Euronext Amsterdam': 'EURONEXT',
-    'Euronext Brussels': 'EURONEXT', 'Euronext Dublin': 'EURONEXT', 'Euronext Lisbon': 'EURONEXT',
-    'Borsa Italiana': 'MIL', 'BME Madrid': 'BME', 'Wiener B\u00f6rse': 'WBAG',
-    'GPW Warsaw': 'GPW',
-  };
-  const tvEx = tvExchangeMap[exchange] || exchange.toUpperCase();
-  // TradingView uses underscore for class shares (e.g. EMBRAC_B, BRK_B)
-  return `${tvEx}:${sym.replace(/-/g, '_')}`;
+  // Priority 2: yahoo_symbol with suffix — convert via TV_SUFFIX_MAP.
+  const fromYahoo = tvFromYahoo(yahooSymbol || primaryTicker);
+  if (fromYahoo) return fromYahoo;
+  // Priority 3: fallback — if primary_ticker has no colon (e.g. bare 'BIRD'), return as-is.
+  if (primaryTicker && !String(primaryTicker).includes(':')) {
+    return `NASDAQ:${String(primaryTicker).replace(/-/g, '_')}`;
+  }
+  return null;
 }
 
 // Render a compact TradingView mini-chart iframe.
