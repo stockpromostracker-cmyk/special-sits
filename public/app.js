@@ -562,7 +562,7 @@ function renderIncentiveSection(inc) {
 const TV_SUFFIX_MAP = {
   '.ST': 'OMXSTO', '.CO': 'OMXCOP', '.HE': 'OMXHEX', '.OL': 'OSL', '.IC': 'OMXICE',
   '.L': 'LSE',
-  '.AS': 'ENXTAM', '.PA': 'EURONEXT', '.BR': 'ENXTBR', '.LS': 'ENXTLS',
+  '.AS': 'EURONEXT', '.PA': 'EURONEXT', '.BR': 'EURONEXT', '.LS': 'EURONEXT',
   '.IR': 'EURONEXT', '.DE': 'XETR', '.SW': 'SIX', '.MI': 'MIL', '.MC': 'BME',
   '.VI': 'WBAG', '.WA': 'GPW', '.TO': 'TSX', '.V': 'TSXV',
 };
@@ -576,9 +576,9 @@ const TV_EXCHANGE_MAP = {
   'Oslo B\u00f8rs': 'OSL', 'Oslo Bors': 'OSL', 'OSL': 'OSL',
   'Nasdaq Iceland': 'OMXICE', 'OMXICE': 'OMXICE',
   'SIX': 'SIX', 'XETRA': 'XETR', 'XETR': 'XETR', 'Frankfurt': 'FWB', 'FWB': 'FWB',
-  'Euronext Paris': 'EURONEXT', 'Euronext Amsterdam': 'ENXTAM',
-  'Euronext Brussels': 'ENXTBR', 'Euronext Dublin': 'EURONEXT', 'Euronext Lisbon': 'ENXTLS',
-  'EURONEXT': 'EURONEXT', 'ENXTAM': 'ENXTAM', 'ENXTBR': 'ENXTBR', 'ENXTLS': 'ENXTLS',
+  'Euronext Paris': 'EURONEXT', 'Euronext Amsterdam': 'EURONEXT',
+  'Euronext Brussels': 'EURONEXT', 'Euronext Dublin': 'EURONEXT', 'Euronext Lisbon': 'EURONEXT',
+  'EURONEXT': 'EURONEXT',
   'Borsa Italiana': 'MIL', 'MIL': 'MIL',
   'BME Madrid': 'BME', 'BME': 'BME',
   'Wiener B\u00f6rse': 'WBAG', 'WBAG': 'WBAG',
