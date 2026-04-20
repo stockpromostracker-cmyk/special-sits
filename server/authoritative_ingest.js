@@ -20,6 +20,9 @@ const { query, migrate, parseJson, serializeJson, USE_PG } = require('./db');
 const sec          = require('./sources/sec');
 const lse          = require('./sources/lse_rns');
 const nordic       = require('./sources/nordic');
+const amfBdif      = require('./sources/amf_bdif');
+const swissTob     = require('./sources/swiss_tob');
+const euNewsMA     = require('./sources/eu_news_ma');
 const stockanalysis = require('./sources/stockanalysis');
 const knownEvents  = require('./sources/known_events');
 const { refreshDeal } = require('./market_data');
@@ -238,7 +241,9 @@ async function runAuthoritativeCycle({ wipeExisting = false, skipMarket = false 
   }
 
   const results = {
-    sec: null, lse: null, nordic: null, sa: null, known: null,
+    sec: null, lse: null, nordic: null,
+    amf: null, swiss: null, eu_news: null,
+    sa: null, known: null,
     upserts: { inserted: 0, updated: 0 },
     news: null,
     market: { refreshed: 0 },
@@ -280,6 +285,42 @@ async function runAuthoritativeCycle({ wipeExisting = false, skipMarket = false 
       results.upserts[r.action === 'inserted' ? 'inserted' : 'updated']++;
     }
   } catch (e) { console.error('[auth-ingest] Nordic failed:', e.message); }
+
+  // ---- 3b. AMF BDIF (France — regulator JSON API) ----
+  console.log('[auth-ingest] fetching AMF BDIF…');
+  try {
+    results.amf = await amfBdif.fetchAll();
+    console.log(`[auth-ingest] AMF: ${results.amf.count} of ${results.amf.items_scanned} scanned`);
+    for (const d of results.amf.deals) {
+      if (shouldSuppress(d)) continue;
+      const r = await upsertDeal(d);
+      results.upserts[r.action === 'inserted' ? 'inserted' : 'updated']++;
+    }
+  } catch (e) { console.error('[auth-ingest] AMF failed:', e.message); }
+
+  // ---- 3c. Swiss Takeover Board (CH — regulator HTML) ----
+  console.log('[auth-ingest] fetching Swiss TOB…');
+  try {
+    results.swiss = await swissTob.fetchAll();
+    console.log(`[auth-ingest] Swiss TOB: ${results.swiss.count} of ${results.swiss.items_scanned} scanned`);
+    for (const d of results.swiss.deals) {
+      if (shouldSuppress(d)) continue;
+      const r = await upsertDeal(d);
+      results.upserts[r.action === 'inserted' ? 'inserted' : 'updated']++;
+    }
+  } catch (e) { console.error('[auth-ingest] Swiss TOB failed:', e.message); }
+
+  // ---- 3d. EU News M&A (DE/NL/IT/ES/BE/AT — Google News RSS fallback) ----
+  console.log('[auth-ingest] fetching EU News M&A…');
+  try {
+    results.eu_news = await euNewsMA.fetchAll();
+    console.log(`[auth-ingest] EU News: ${results.eu_news.count} of ${results.eu_news.items_scanned} scanned, ${results.eu_news.errors} errors`);
+    for (const d of results.eu_news.deals) {
+      if (shouldSuppress(d)) continue;
+      const r = await upsertDeal(d);
+      results.upserts[r.action === 'inserted' ? 'inserted' : 'updated']++;
+    }
+  } catch (e) { console.error('[auth-ingest] EU News failed:', e.message); }
 
   // ---- 4. StockAnalysis aggregator ----
   console.log('[auth-ingest] fetching StockAnalysis aggregator…');
