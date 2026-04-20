@@ -10,6 +10,7 @@ const { refreshAllDeals, refreshDeal } = require('./market_data');
 const { marketCapBucket, dealSizeBucket, COUNTRY_TO_REGION, REGION_HIERARCHY, UI_REGIONS } = require('./tickers');
 const { rollupAll, rollupDeal, listTransactionsForDeal } = require('./incentives');
 const { fetchAllInsider } = require('./insider_feeds');
+const { refreshAllHolders, refreshHoldersForDeal } = require('./holder_feeds');
 const { ownershipAndCompForDeal } = require('./ownership');
 const { fetchAllShort, shortInterestForDeal } = require('./sources/short_interest');
 const { runAuthoritativeCycle } = require('./authoritative_ingest');
@@ -964,6 +965,26 @@ app.post('/api/admin/refresh-insider', async (req, res) => {
     res.json({ ok: true, insider: feeds, rollup: roll });
   } catch (e) {
     console.error('[refresh-insider]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Refresh beneficial-holder feeds (SEC 13F / UK TR-1 / Nordic IR / NL AFM).
+app.post('/api/admin/refresh-holders', async (req, res) => {
+  const ingestOk = INGEST_TOKEN && req.header('x-ingest-token') === INGEST_TOKEN;
+  const adminOk  = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  if (!ingestOk && !adminOk) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    if (req.query.deal_id) {
+      const [d] = await query(`SELECT * FROM deals WHERE id = $1`, [req.query.deal_id]);
+      if (!d) return res.status(404).json({ error: 'deal not found' });
+      const r = await refreshHoldersForDeal(d);
+      return res.json({ ok: true, ...r });
+    }
+    const r = await refreshAllHolders({ activeOnly: req.query.all !== '1', max: Number(req.query.max || 80) });
+    res.json({ ok: true, ...r });
+  } catch (e) {
+    console.error('[refresh-holders]', e);
     res.status(500).json({ error: e.message });
   }
 });

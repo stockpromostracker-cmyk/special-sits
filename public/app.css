@@ -488,3 +488,37 @@ tbody tr:last-child td { border-bottom: none; }
 .about-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 4px; }
 @media (max-width: 720px) { .about-cols { grid-template-columns: 1fr; gap: 8px; } }
 .about-caveat { color: var(--muted); font-size: 13px; line-height: 1.6; font-style: italic; }
+
+/* ---- Ownership & concentration ------------------------------------------ */
+.detail-subhead {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.concentration-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  margin: 6px 0 4px;
+}
+.concentration-grid .kpi {
+  padding: 8px 10px;
+}
+.concentration-grid .kpi-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.concentration-grid .kpi-value {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+.concentration-grid .kpi-muted .kpi-value {
+  color: var(--muted);
+}

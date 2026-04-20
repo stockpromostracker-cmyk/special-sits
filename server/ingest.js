@@ -241,6 +241,12 @@ async function runCycle() {
   const shortPromise = fetchAllShort({ finraDays: 3 })
     .catch(e => { console.error('[ingest] short feeds failed', e.message); return { fetched: 0, inserted: 0 }; });
 
+  // ---- 2c. Beneficial-holder feeds --------------------------------------
+  // SEC 13F (US) + UK TR-1 RSS + NL AFM RSS + Nordic IR tables. Parallel.
+  const { refreshAllHolders } = require('./holder_feeds');
+  const holdersPromise = refreshAllHolders({ activeOnly: true, max: 60 })
+    .catch(e => { console.error('[ingest] holder feeds failed', e.message); return { total: 0, by_source: {} }; });
+
   // ---- 3. Classify pending deals -----------------------------------------
   const cls = await classifyPending();
   console.log(`[ingest] classified ${cls.classified}, promoted ${cls.promoted}, skipped_prefilter ${cls.skipped_prefilter}, skipped_dup ${cls.skipped_dup}`);
@@ -248,6 +254,7 @@ async function runCycle() {
   // ---- 4. Await insider feeds then roll up incentives -------------------
   const insider = await insiderPromise;
   const shortIx = await shortPromise;
+  const holders = await holdersPromise;
   const incentives = await rollupAll({ activeOnly: true, limit: 500 })
     .catch(e => { console.error('[ingest] rollup failed', e.message); return { ok: 0, total: 0 }; });
   console.log(`[ingest] insider fetched=${insider.fetched} inserted=${insider.inserted}; short fetched=${shortIx.fetched} inserted=${shortIx.inserted}; rollup ok=${incentives.ok}/${incentives.total}`);
@@ -255,6 +262,7 @@ async function runCycle() {
   return { fetched, inserted, ...cls,
            insider_fetched: insider.fetched, insider_inserted: insider.inserted,
            short_fetched: shortIx.fetched, short_inserted: shortIx.inserted,
+           holders_inserted: holders.total || 0, holders_by_source: holders.by_source || {},
            incentives_rolled: incentives.ok };
 }
 

@@ -630,20 +630,128 @@ if (!window.__rgGraphWired) {
 // CEO/NEO compensation (US issuers with SEC XBRL Pay-vs-Performance).
 // Link-outs shown: DEF 14A, 13D/G, Form 3/4 SEC searches (US only).
 function renderOwnershipCompSection(d, own) {
-  const linksHtml = renderOfficialDocLinksInner(d);
-  const ownershipHtml = renderOwnershipTable(own);
-  const compHtml = renderCompensationBlock(own);
+  const linksHtml        = renderOfficialDocLinksInner(d);
+  const concentrationHtml= renderConcentration(own);
+  const beneficialHtml   = renderBeneficialHolders(own);
+  const ownershipHtml    = renderOwnershipTable(own);
+  const shortsHtml       = renderDisclosedShorts(own);
+  const activistsHtml    = renderActivists(own);
+  const compHtml         = renderCompensationBlock(own);
 
-  // If absolutely nothing to show (non-US, no insider history), bail.
-  if (!linksHtml && !ownershipHtml && !compHtml) return '';
+  if (!linksHtml && !ownershipHtml && !compHtml && !beneficialHtml && !shortsHtml && !activistsHtml) return '';
 
   return `<div class="section">
-    <h3>Compensation &amp; ownership</h3>
-    <p class="hint-text">Skin-in-the-game: who owns it, how they're paid.</p>
+    <h3>Ownership &amp; compensation</h3>
+    <p class="hint-text">Skin-in-the-game: who owns it, how they're paid, who's shorting it.</p>
+    ${concentrationHtml}
+    ${beneficialHtml}
+    ${activistsHtml}
+    ${shortsHtml}
     ${compHtml}
     ${ownershipHtml}
     ${linksHtml}
   </div>`;
+}
+
+function renderConcentration(own) {
+  const c = own?.concentration;
+  if (!c) return '';
+  const pct = (n) => (n == null || !isFinite(n)) ? '—' : `${Number(n).toFixed(1)}%`;
+  const freeFloat = Math.max(0, 100 - (Number(c.insider_pct) || 0) - (Number(c.strategic_pct) || 0));
+  const cells = [
+    { label: 'Top 5 holders',     value: pct(c.top5_pct) },
+    { label: 'Top 10 holders',    value: pct(c.top10_pct) },
+    { label: 'Institutional',     value: pct(c.institutional_pct) },
+    { label: 'Insider / strategic', value: pct((Number(c.insider_pct) || 0) + (Number(c.strategic_pct) || 0)) },
+    { label: 'Implied free float',value: pct(freeFloat), subtle: true },
+  ];
+  return `<div class="concentration-grid">
+    ${cells.map(c => `<div class="kpi${c.subtle ? ' kpi-muted':''}">
+      <div class="kpi-label">${esc(c.label)}</div>
+      <div class="kpi-value">${esc(c.value)}</div>
+    </div>`).join('')}
+  </div>
+  <p class="hint-text" style="margin:4px 0 12px;font-size:11px">
+    From ${c.holder_count} disclosed holders across ${(own.beneficial?.sources || []).join(', ') || 'official filings'}. Implied free float = 100% − insider − strategic.
+  </p>`;
+}
+
+function renderBeneficialHolders(own) {
+  const b = own?.beneficial;
+  if (!b || !b.holders || !b.holders.length) return '';
+  const SOURCE_LABEL = {
+    sec_13f: '13F',
+    uk_tr1: 'TR-1',
+    afm_nl_subst: 'AFM',
+    nordic_major: 'Nordic IR',
+    company_ar: 'AR',
+  };
+  const TYPE_LABEL = {
+    institutional: 'Institutional', index_fund: 'Index',
+    insider: 'Insider', strategic: 'Strategic',
+    state: 'State', foundation: 'Foundation',
+  };
+  const rows = b.holders.slice(0, 20).map(h => {
+    const pct = (h.position_pct != null) ? `${Number(h.position_pct).toFixed(2)}%` : '—';
+    const shares = h.shares ? fmtCompact(h.shares) : '—';
+    const value  = h.value_usd ? fmtUsdCompact(h.value_usd) : '—';
+    const source = SOURCE_LABEL[h.source] || h.source;
+    const type   = TYPE_LABEL[h.holder_type] || (h.holder_type || '');
+    const name   = h.filing_url
+      ? `<a href="${esc(h.filing_url)}" target="_blank" rel="noopener">${esc(h.holder_name)}</a>`
+      : esc(h.holder_name);
+    return `<tr>
+      <td>${name}</td>
+      <td style="color:var(--muted);font-size:12px">${esc(type)}</td>
+      <td class="td-right">${pct}</td>
+      <td class="td-right" style="color:var(--muted)">${shares}</td>
+      <td class="td-right" style="color:var(--muted)">${value}</td>
+      <td style="font-size:11px;color:var(--muted)">${esc(source)}</td>
+      <td style="font-size:11px;color:var(--muted)">${esc(h.as_of_date || '')}</td>
+    </tr>`;
+  }).join('');
+  return `<h4 class="detail-subhead">Top shareholders (disclosed)</h4>
+    <div class="insider-tx-wrap"><table class="insider-tx">
+      <thead><tr>
+        <th>Holder</th><th>Type</th>
+        <th class="td-right">% of cap</th>
+        <th class="td-right">Shares</th>
+        <th class="td-right">Value</th>
+        <th>Source</th><th>As of</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
+
+function renderActivists(own) {
+  const a = own?.activists;
+  if (!a || !a.length) return '';
+  const rows = a.map(r => `<tr>
+    <td>${r.filing_url ? `<a href="${esc(r.filing_url)}" target="_blank" rel="noopener">${esc(r.holder_name)}</a>` : esc(r.holder_name)}</td>
+    <td class="td-right">${r.position_pct != null ? Number(r.position_pct).toFixed(2)+'%' : '—'}</td>
+    <td style="font-size:11px;color:var(--muted)">${esc(r.as_of_date || '')}</td>
+  </tr>`).join('');
+  return `<h4 class="detail-subhead" style="color:var(--warn)">13D/13G activist filers</h4>
+    <div class="insider-tx-wrap"><table class="insider-tx">
+      <thead><tr><th>Filer</th><th class="td-right">Stake</th><th>As of</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
+
+function renderDisclosedShorts(own) {
+  const s = own?.disclosed_shorts;
+  if (!s || !s.length) return '';
+  const rows = s.map(r => `<tr>
+    <td>${esc(r.holder_name || '')}</td>
+    <td class="td-right tx-sell">${r.position_pct != null ? Number(r.position_pct).toFixed(2)+'%' : '—'}</td>
+    <td style="font-size:11px;color:var(--muted)">${esc(r.source || '')}</td>
+    <td style="font-size:11px;color:var(--muted)">${esc(r.as_of_date || '')}</td>
+  </tr>`).join('');
+  return `<h4 class="detail-subhead">Disclosed short positions (≥0.5%)</h4>
+    <div class="insider-tx-wrap"><table class="insider-tx">
+      <thead><tr><th>Fund</th><th class="td-right">% of cap</th><th>Regulator</th><th>As of</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
 }
 
 function renderOwnershipTable(own) {
@@ -670,7 +778,7 @@ function renderOwnershipTable(own) {
       <td style="color:var(--muted);font-size:12px">${esc(r.last_date || '—')}</td>
     </tr>`;
   }).join('');
-  return `<h4 style="margin:12px 0 6px;font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em">Top insiders (3y net)</h4>
+  return `<h4 class="detail-subhead">Recent insider movers (trailing 3y)</h4>
     <div class="insider-tx-wrap"><table class="insider-tx">
       <thead><tr><th>Insider</th><th>Title</th><th class="td-right">Net shares (3y)</th><th>180d activity</th><th>Last</th></tr></thead>
       <tbody>${rows}</tbody>
@@ -693,7 +801,7 @@ function renderCompensationBlock(own) {
     }).join('');
     return `<tr><td>${esc(it.label)}</td>${cells}</tr>`;
   }).join('');
-  return `<h4 style="margin:12px 0 6px;font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em">Executive compensation (SEC Pay-vs-Performance)</h4>
+  return `<h4 class="detail-subhead">Executive compensation (SEC Pay-vs-Performance)</h4>
     <div class="insider-tx-wrap"><table class="insider-tx">
       <thead>${header}</thead>
       <tbody>${rows}</tbody>

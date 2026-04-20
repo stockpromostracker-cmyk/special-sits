@@ -282,6 +282,55 @@ async function migrate() {
     try { await query(`CREATE INDEX IF NOT EXISTS idx_deals_target_name_trgm ON deals USING gin (target_name gin_trgm_ops)`); } catch (_) {}
   }
 
+  // ---- Beneficial holders (snapshot of top shareholders) ------------------
+  // Who ACTUALLY owns the stock — not transaction history. Sources:
+  //   sec_13f       : US 13F-HR aggregated by holder for a given quarter
+  //   uk_tr1        : UK RNS TR-1 major-holder notifications (>=3% thresholds)
+  //   nordic_major  : Nasdaq Nordic / OMX major shareholder lists (company IR)
+  //   afm_nl_subst  : Netherlands AFM substantial-holdings register (>=3%)
+  //   company_ar    : Scraped from annual report / proxy major-holders table
+  //
+  // One row per (issuer, holder, as_of_date, source). Upsert by that key.
+  await query(`CREATE TABLE IF NOT EXISTS beneficial_holders (
+    id ${pkSerial},
+    source TEXT NOT NULL,
+    issuer_name TEXT,
+    issuer_ticker TEXT,                -- EXCHANGE:SYMBOL when known
+    isin TEXT,
+    issuer_country TEXT,
+    holder_name TEXT NOT NULL,
+    holder_type TEXT,                  -- institutional | insider | strategic | state | foundation | index_fund
+    holder_cik TEXT,                   -- for SEC 13F
+    as_of_date TEXT NOT NULL,          -- YYYY-MM-DD (quarter-end, filing date, etc.)
+    shares NUMERIC,                    -- shares held
+    position_pct NUMERIC,              -- % of shares outstanding / voting rights
+    value_usd NUMERIC,                 -- market value at reporting date
+    filing_url TEXT,
+    is_13d INTEGER DEFAULT 0,          -- activist flag (13D not 13G)
+    raw_holder_type TEXT,              -- original category string from source
+    fetched_at ${ts},
+    UNIQUE(source, issuer_ticker, isin, holder_name, as_of_date)
+  )`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_bh_issuer_ticker ON beneficial_holders(issuer_ticker)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_bh_isin          ON beneficial_holders(isin)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_bh_as_of         ON beneficial_holders(as_of_date)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_bh_issuer_name   ON beneficial_holders(issuer_name)`);
+
+  // Shares-outstanding snapshot so we can compute % and free-float consistently.
+  await query(`CREATE TABLE IF NOT EXISTS shares_outstanding (
+    id ${pkSerial},
+    ticker TEXT NOT NULL,
+    isin TEXT,
+    shares_outstanding NUMERIC,
+    insider_shares NUMERIC,            -- total held by insiders (officers+directors+founders) when known
+    float_shares NUMERIC,              -- publicly tradeable shares
+    as_of_date TEXT NOT NULL,
+    source TEXT,                       -- yahoo | sec_xbrl | company_ar
+    fetched_at ${ts},
+    UNIQUE(ticker, as_of_date)
+  )`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_so_ticker ON shares_outstanding(ticker)`);
+
   // ---- News items: attached to a deal, never create a deal on their own ----
   // Sourced from the legacy news firehose + Gemini classifier. Each item is
   // linked to a deal via ticker match or fuzzy company-name match.
