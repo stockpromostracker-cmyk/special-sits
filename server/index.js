@@ -569,7 +569,7 @@ app.post('/api/admin/collapse-duplicates', async (req, res) => {
     const params = [ticker];
     let where = `primary_ticker = $1`;
     if (dealType) { params.push(dealType); where += ` AND deal_type = $2`; }
-    const rows = (await query(`SELECT id, primary_ticker, filing_date, announce_date, status, event_type, completed_date FROM deals WHERE ${where} ORDER BY filing_date DESC NULLS LAST, announce_date DESC NULLS LAST, id DESC`, params)).rows || [];
+    const rows = await query(`SELECT id, primary_ticker, filing_date, announce_date, status, event_type, completed_date FROM deals WHERE ${where} ORDER BY filing_date DESC NULLS LAST, announce_date DESC NULLS LAST, id DESC`, params);
     if (rows.length === 0) return res.json({ ok: true, kept: null, deleted: 0 });
     if (rows.length === 1) {
       // Still apply overrides if any
@@ -582,8 +582,8 @@ app.post('/api/admin/collapse-duplicates', async (req, res) => {
     }
     const keepId = rows[0].id;
     const deleteIds = rows.slice(1).map(r => r.id);
-    const placeholders = deleteIds.map((_, i) => `$${i+1}`).join(',');
-    await query(`DELETE FROM deals WHERE id IN (${placeholders})`, deleteIds);
+    const delPlaceholders = deleteIds.map((_, i) => `$${i+1}`).join(',');
+    await query(`DELETE FROM deals WHERE id IN (${delPlaceholders})`, deleteIds);
     if (Object.keys(override).length) {
       const sets = Object.keys(override).map((k, i) => `${k} = $${i+1}`);
       const vals = Object.values(override); vals.push(keepId);
@@ -608,8 +608,7 @@ app.post('/api/admin/purge-stale-source', async (req, res) => {
     if (!keep.length) return res.status(400).json({ error: 'missing keep array (safety)' });
     const placeholders = keep.map((_, i) => `$${i+2}`).join(',');
     const sql = `DELETE FROM deals WHERE primary_source = $1 AND source_filing_url NOT IN (${placeholders}) RETURNING id, target_name, source_filing_url`;
-    const result = await query(sql, [source, ...keep]);
-    const rows = result.rows || [];
+    const rows = await query(sql, [source, ...keep]);
     res.json({ ok: true, deleted: rows.length, sample: rows.slice(0, 10) });
   } catch (e) {
     res.status(500).json({ error: e.message });
