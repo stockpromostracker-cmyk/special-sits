@@ -230,6 +230,9 @@ function fiveYearsAgo() { const d = new Date(); d.setFullYear(d.getFullYear() - 
 // current-holder snapshot requires keeping the most-recent position per
 // (issuer, holder) — done at query time in the UI.
 async function fetchUkTr1({ days = 365 } = {}) {
+  // Google News title is too unstructured for reliable parsing. Only keep
+  // rows where we can extract BOTH a holder name AND a percentage; otherwise
+  // discard to avoid junk in beneficial_holders.
   const q = 'site:londonstockexchange.com "Holding(s) in Company" OR "TR-1"';
   const url = `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-GB&gl=GB&ceid=GB:en`;
   try {
@@ -242,7 +245,11 @@ async function fetchUkTr1({ days = 365 } = {}) {
     const out = [];
     for (const it of items.slice(0, 40)) {
       const parsed = parseTr1Title(it.title || '');
-      if (!parsed) continue;
+      if (!parsed || !parsed.pct || !parsed.holder_name || !parsed.issuer_name) continue;
+      // Reject rows where issuer_name is a generic RNS prefix.
+      if (/^(Holding\(s\) in Company|TR-1|Rule|Form)/i.test(parsed.issuer_name)) continue;
+      // Reject holder_name that looks like a timestamp.
+      if (/^\d{1,2}:\d{2}/.test(parsed.holder_name)) continue;
       out.push({
         source: 'uk_tr1',
         issuer_name: parsed.issuer_name,
@@ -305,7 +312,10 @@ async function fetchAfmSubstantial({ days = 365 } = {}) {
     const out = [];
     for (const it of items.slice(0, 40)) {
       const parsed = parseAfmTitle(it.title || '');
-      if (!parsed) continue;
+      if (!parsed || !parsed.pct || !parsed.holder_name || !parsed.issuer_name) continue;
+      // Filter junk: issuer or holder looking like a URL/timestamp/generic word
+      if (/^(https?:|AFM|Registers?|\d{1,2}:)/i.test(parsed.issuer_name)) continue;
+      if (/^(https?:|AFM|\d{1,2}:)/i.test(parsed.holder_name)) continue;
       out.push({
         source: 'afm_nl_subst',
         issuer_name: parsed.issuer_name,
