@@ -15,6 +15,7 @@
 //   shares, price_local, value_local, currency, price_usd, value_usd
 
 const UA = 'SpecialSits Research cfrjacobsson@gmail.com';
+const { toUsd } = require('../market_data');
 
 // --------------------------------------------------------------------------
 // Helpers
@@ -263,6 +264,9 @@ async function fetchSwedenFi({ days = 30 } = {}) {
       const vol = parseNumber(volume);
       const px  = parseNumber(price);
       const val = vol != null && px != null ? vol * px : null;
+      const ccy = (currency || 'SEK').trim().toUpperCase();
+      const pxUsd = px != null ? toUsd(px, ccy) : null;
+      const valUsd = val != null ? toUsd(val, ccy) : null;
 
       // Build a stable source_id. FI doesn't expose a per-filing permalink
       // from the export, so we hash the main fields.
@@ -286,9 +290,9 @@ async function fetchSwedenFi({ days = 30 } = {}) {
         shares: vol,
         price_local: px,
         value_local: val,
-        currency: (currency || 'SEK').trim().toUpperCase(),
-        price_usd: null,
-        value_usd: null,
+        currency: ccy,
+        price_usd: pxUsd,
+        value_usd: valUsd,
         _lei: (lei || '').trim() || null,
         _isin: (isin || '').trim() || null,
         _venue: (venue || '').trim() || null,

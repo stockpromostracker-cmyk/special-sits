@@ -24,6 +24,38 @@ const stockanalysis = require('./sources/stockanalysis');
 const knownEvents  = require('./sources/known_events');
 const { refreshDeal } = require('./market_data');
 
+// ---- Deal suppression list ----------------------------------------------
+// When an automated source (SEC, aggregators) would re-ingest a deal that
+// we've already curated correctly in known_events.json (e.g. Magnum Ice
+// Cream re-appearing as an IPO via its 424B4 resale filing), skip it here.
+//
+// Keyed on (primary_ticker, deal_type). Case-insensitive ticker match. If
+// the key matches and the source is NOT 'company_press_release' (i.e. a
+// known_events entry), the deal is dropped before upsert.
+const SUPPRESS_AUTO_INGEST = [
+  // Magnum is a Unilever demerger, not an IPO. The SEC 424B4 is a resale
+  // prospectus for Unilever's ~19.9% retained stake, not a primary listing.
+  { ticker: 'MICC', deal_type: 'ipo', reason: 'Magnum is a spin_off, not an IPO; curated in known_events' },
+  // Titan America is a partial carve-out IPO (parent kept 87%), properly
+  // classified in known_events. SEC may still index it as generic IPO.
+  // We don't suppress it because the known_events entry is also deal_type=ipo.
+];
+
+function shouldSuppress(d) {
+  if (!d.primary_ticker) return false;
+  // Only suppress auto-sources; always allow curated company_press_release.
+  if (d.primary_source === 'company_press_release') return false;
+  // Strip exchange prefix for comparison (NYSE:MICC → MICC)
+  const bareTicker = String(d.primary_ticker).split(':').pop().toUpperCase();
+  for (const rule of SUPPRESS_AUTO_INGEST) {
+    if (rule.ticker.toUpperCase() === bareTicker && rule.deal_type === d.deal_type) {
+      console.log(`[auth-ingest] suppressing ${d.primary_ticker}/${d.deal_type}: ${rule.reason}`);
+      return true;
+    }
+  }
+  return false;
+}
+
 // ---- Upsert helper -------------------------------------------------------
 // Deals are keyed on external_key. If a matching external_key already exists
 // we update key fields; otherwise we insert. External keys are of the form
@@ -218,6 +250,7 @@ async function runAuthoritativeCycle({ wipeExisting = false, skipMarket = false 
     results.sec = await sec.fetchAll();
     console.log(`[auth-ingest] SEC: ${results.sec.deals_with_ticker.length} with-ticker / ${results.sec.deals.length} total`);
     for (const d of results.sec.deals_with_ticker) {
+      if (shouldSuppress(d)) continue;
       const r = await upsertDeal(d);
       results.upserts[r.action === 'inserted' ? 'inserted' : 'updated']++;
     }
@@ -230,6 +263,7 @@ async function runAuthoritativeCycle({ wipeExisting = false, skipMarket = false 
     console.log(`[auth-ingest] LSE via ${results.lse.source}: ${results.lse.count} deals`);
     for (const d of results.lse.deals) {
       if (!d.primary_ticker) continue;
+      if (shouldSuppress(d)) continue;
       const r = await upsertDeal(d);
       results.upserts[r.action === 'inserted' ? 'inserted' : 'updated']++;
     }
@@ -241,6 +275,7 @@ async function runAuthoritativeCycle({ wipeExisting = false, skipMarket = false 
     results.nordic = await nordic.fetchAll();
     console.log(`[auth-ingest] Nordic: ${results.nordic.count} of ${results.nordic.items_scanned} scanned`);
     for (const d of results.nordic.deals) {
+      if (shouldSuppress(d)) continue;
       const r = await upsertDeal(d);
       results.upserts[r.action === 'inserted' ? 'inserted' : 'updated']++;
     }
@@ -252,6 +287,7 @@ async function runAuthoritativeCycle({ wipeExisting = false, skipMarket = false 
     results.sa = await stockanalysis.fetchAll();
     console.log(`[auth-ingest] StockAnalysis: ${results.sa.spinoffs} spinoffs + ${results.sa.ipos} IPOs`);
     for (const d of results.sa.deals) {
+      if (shouldSuppress(d)) continue;
       const r = await upsertDeal(d);
       results.upserts[r.action === 'inserted' ? 'inserted' : 'updated']++;
     }

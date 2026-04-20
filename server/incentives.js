@@ -102,8 +102,13 @@ async function rollupDeal(deal) {
 }
 
 async function rollupAll({ activeOnly = true, limit = 500 } = {}) {
+  // Include completed deals up to 365 days old — insider activity around a
+  // recently-completed spin-off (e.g. Coffee Stain in Dec 2025) is highly
+  // material. Stale completed deals (>1y) are skipped to keep this fast.
   const where = activeOnly
-    ? "WHERE status IN ('rumored','announced','pending')"
+    ? `WHERE status IN ('rumored','announced','pending')
+          OR (status = 'completed' AND (completed_date IS NULL
+              OR completed_date >= ${process.env.DATABASE_URL ? "NOW() - INTERVAL '365 days'" : "date('now', '-365 days')"}))`
     : '';
   const rows = await query(`SELECT * FROM deals ${where} ORDER BY id DESC LIMIT $1`, [limit]);
   let ok = 0, skipped = 0;
@@ -138,15 +143,42 @@ async function listTransactionsForDeal(deal) {
 // Portable search across Postgres and SQLite. Name-match uses LIKE against each
 // candidate string individually (SQLite has no ANY, and Postgres ANY fails on
 // empty arrays).
+//
+// We also fuzzy-match issuer_name with:
+//   • case-insensitive prefix match (e.g. "Coffee Stain Group AB" LIKE "coffee stain group%")
+//   • stripping legal suffixes (AB / plc / NV / SA / Inc / Ltd) before comparison
+function stripLegalSuffix(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[.,]/g, ' ')
+    .replace(/\b(ab|plc|nv|n\.v\.|s\.e\.|se|sa|oyj|asa|as|a\/s|gmbh|inc|ltd|corp|corporation|holdings|group|company|co)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 async function findTransactions({ ticker, bareSymbol, nameCandidates, cutoff, orderAndLimit }) {
   const where = [
     `(issuer_ticker = $1 OR issuer_ticker = $2`,
   ];
   const params = [ticker, `US:${bareSymbol}`];
   const nameClauses = [];
+  const seen = new Set();
   for (const n of nameCandidates.slice(0, 4)) {
-    params.push(n);
-    nameClauses.push(`LOWER(issuer_name) = $${params.length}`);
+    // Exact match
+    if (!seen.has(n)) {
+      seen.add(n);
+      params.push(n);
+      nameClauses.push(`LOWER(issuer_name) = $${params.length}`);
+    }
+    // Prefix match — catches "Coffee Stain" matching "Coffee Stain Group AB"
+    // and vice-versa. Use the first two meaningful words as the prefix.
+    const stripped = stripLegalSuffix(n);
+    const prefix = stripped.split(/\s+/).slice(0, 2).join(' ');
+    if (prefix && prefix.length >= 4 && !seen.has(prefix)) {
+      seen.add(prefix);
+      params.push(`${prefix}%`);
+      nameClauses.push(`LOWER(issuer_name) LIKE $${params.length}`);
+    }
   }
   if (nameClauses.length) {
     where[0] += ` OR ${nameClauses.join(' OR ')}`;

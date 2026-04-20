@@ -415,7 +415,7 @@ async function fetchAllInsider() {
     fetchLseDirectorDealings().catch(e => (console.error('lse rns', e.message), [])),
     fetchNordicMar().catch(e => (console.error('nordic news-proxy', e.message), [])),
     fetchAfm({ days: 180 }).catch(e => (console.error('afm nl', e.message), [])),
-    fetchSwedenFi({ days: 60 }).catch(e => (console.error('fi se', e.message), [])),
+    fetchSwedenFi({ days: 180 }).catch(e => (console.error('fi se', e.message), [])),
   ]);
   const all = [...us, ...stakes, ...uk, ...nordic, ...nl, ...se];
   const inserted = await saveInsiderTransactions(all);
