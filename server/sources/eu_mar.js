@@ -216,7 +216,32 @@ async function fetchAfm({ days = 180 } = {}) {
 const FI_EXPORT_BASE =
   'https://marknadssok.fi.se/publiceringsklient/en-GB/Search/Search';
 
-async function fetchSwedenFi({ days = 30 } = {}) {
+// The FI firehose export caps out at ~1000 rows for a broad query, which
+// means recent activity from less-frequent issuers (e.g. Embracer family)
+// gets crowded out by high-frequency ones. Callers can pass `issuers` (array
+// of issuer-name substrings) to run per-issuer exports that guarantee full
+// coverage for tracked deals regardless of global volume.
+async function fetchSwedenFi({ days = 30, issuers = [] } = {}) {
+  if (issuers && issuers.length) {
+    const all = [];
+    const seenIds = new Set();
+    for (const issuer of issuers) {
+      try {
+        const rows = await fetchSwedenFiInner({ days, issuer });
+        for (const r of rows) {
+          if (!seenIds.has(r.source_id)) { seenIds.add(r.source_id); all.push(r); }
+        }
+      } catch (e) {
+        console.error(`[insider:fi_se] issuer=${issuer}`, e.message);
+      }
+    }
+    console.log(`[insider:fi_se] per-issuer mode: ${all.length} rows across ${issuers.length} issuers`);
+    return all;
+  }
+  return fetchSwedenFiInner({ days, issuer: '' });
+}
+
+async function fetchSwedenFiInner({ days = 30, issuer = '' }) {
   const toDate = new Date();
   const fromDate = new Date(toDate.getTime() - days * 24 * 3600 * 1000);
   const fmt = (d) => d.toISOString().slice(0, 10);
@@ -224,7 +249,7 @@ async function fetchSwedenFi({ days = 30 } = {}) {
   // (which may have a tx date from earlier in the 30-day window).
   const params = new URLSearchParams({
     SearchFunctionType: 'Insyn',
-    Utgivare: '',
+    Utgivare: issuer || '',
     PersonILedandeStällningNamn: '',
     'Transaktionsdatum.From': '',
     'Transaktionsdatum.To': '',
@@ -298,7 +323,7 @@ async function fetchSwedenFi({ days = 30 } = {}) {
         _venue: (venue || '').trim() || null,
       });
     }
-    console.log(`[insider:fi_se] ${rows.length} rows (days=${days})`);
+    console.log(`[insider:fi_se] ${rows.length} rows (days=${days}${issuer ? `, issuer=${issuer}` : ''})`);
     return rows;
   } catch (e) {
     console.error('[insider:fi_se]', e.message);

@@ -408,19 +408,56 @@ async function saveInsiderTransactions(rows) {
   return inserted;
 }
 
+// Build a list of Swedish issuer-name substrings derived from tracked deals
+// (country='SE' or ticker prefix STO:/SE0). We run per-issuer FI exports for
+// these plus the firehose — guarantees coverage for recent spin-offs even
+// when they’re low-volume filers.
+async function swedishIssuersFromDeals() {
+  const rows = await query(
+    `SELECT DISTINCT target_name, parent_name, spinco_name
+       FROM deals
+      WHERE country = 'SE'
+         OR primary_ticker LIKE 'STO:%'
+         OR parent_ticker LIKE 'STO:%'
+         OR spinco_ticker LIKE 'STO:%'`
+  );
+  const set = new Set();
+  for (const r of rows) {
+    for (const n of [r.target_name, r.parent_name, r.spinco_name]) {
+      if (n && n.trim()) set.add(n.trim());
+    }
+  }
+  // Keep it bounded — 60 is plenty for our current coverage
+  return [...set].slice(0, 60);
+}
+
 async function fetchAllInsider() {
-  const [us, stakes, uk, nordic, nl, se] = await Promise.all([
+  const swedishIssuers = await swedishIssuersFromDeals().catch(e => {
+    console.error('swedish issuers lookup', e.message);
+    return [];
+  });
+  const [us, stakes, uk, nordic, nl, se, seTargeted] = await Promise.all([
     fetchSecForm4({ limit: 40 }).catch(e => (console.error('sec form4', e.message), [])),
     fetchSec13dg({ limit: 60 }).catch(e => (console.error('sec 13dg', e.message), [])),
     fetchLseDirectorDealings().catch(e => (console.error('lse rns', e.message), [])),
     fetchNordicMar().catch(e => (console.error('nordic news-proxy', e.message), [])),
     fetchAfm({ days: 180 }).catch(e => (console.error('afm nl', e.message), [])),
-    fetchSwedenFi({ days: 180 }).catch(e => (console.error('fi se', e.message), [])),
+    fetchSwedenFi({ days: 60 }).catch(e => (console.error('fi se firehose', e.message), [])),
+    swedishIssuers.length
+      ? fetchSwedenFi({ days: 365, issuers: swedishIssuers })
+          .catch(e => (console.error('fi se targeted', e.message), []))
+      : Promise.resolve([]),
   ]);
-  const all = [...us, ...stakes, ...uk, ...nordic, ...nl, ...se];
+  // Deduplicate by (source, source_id)
+  const seen = new Set();
+  const all = [];
+  for (const r of [...us, ...stakes, ...uk, ...nordic, ...nl, ...se, ...seTargeted]) {
+    const k = `${r.source}|${r.source_id}`;
+    if (!seen.has(k)) { seen.add(k); all.push(r); }
+  }
   const inserted = await saveInsiderTransactions(all);
-  console.log(`[insider] fetched ${all.length} (us=${us.length} stakes=${stakes.length} uk=${uk.length} nordic=${nordic.length} nl=${nl.length} se=${se.length}), inserted ${inserted}`);
-  return { fetched: all.length, inserted };
+  console.log(`[insider] fetched ${all.length} unique (us=${us.length} stakes=${stakes.length} uk=${uk.length} nordic=${nordic.length} nl=${nl.length} se-fire=${se.length} se-targeted=${seTargeted.length}), inserted ${inserted}`);
+  return { fetched: all.length, inserted, targeted_issuers: swedishIssuers.length };
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
