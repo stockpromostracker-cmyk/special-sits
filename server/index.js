@@ -1014,6 +1014,7 @@ app.post('/api/admin/purge-junk-holders', requireAdmin, async (req, res) => {
     const r = await query(`
       DELETE FROM beneficial_holders
        WHERE position_pct IS NULL
+          OR source LIKE 'test_diag%'
           OR (issuer_ticker IS NULL AND issuer_name IS NULL)
           OR holder_name ~ '^[0-9]{1,2}:[0-9]{2}'
           OR holder_name ILIKE 'https://%'
