@@ -86,6 +86,9 @@ function route() {
   if (hash.startsWith('/admin')) {
     document.querySelector('[data-nav="admin"]')?.classList.add('active');
     renderAdmin();
+  } else if (hash.startsWith('/about')) {
+    document.querySelector('[data-nav="about"]')?.classList.add('active');
+    renderAbout();
   } else {
     document.querySelector('[data-nav="screener"]')?.classList.add('active');
     renderScreener();
@@ -1338,6 +1341,138 @@ function renderNewsTimeline(items) {
         `).join('')}
       </ul>
     </div>`;
+}
+
+// ---- About ----------------------------------------------------------------
+async function renderAbout() {
+  let s = state.stats;
+  if (!s) {
+    try { s = await api('/api/stats'); state.stats = s; } catch { s = {}; }
+  }
+  const fmt = (n) => (n || 0).toLocaleString();
+  view.innerHTML = `
+    <div class="about-page">
+      <div class="about-hero">
+        <h1>Global special situations tracker</h1>
+        <p class="about-lede">
+          SpecialSits is a single-operator research tool for following the niche corners of
+          public equity markets — spin-offs, demergers, IPOs with meaningful free float,
+          public-to-public mergers, SPAC arbitrage, tender offers, and other corporate events
+          where the setup itself is the edge.
+        </p>
+        <div class="about-kpis">
+          ${kpi('Total deals', fmt(s.total))}
+          ${kpi('Spin-offs', fmt(s.spin_off))}
+          ${kpi('IPOs', fmt(s.ipo))}
+          ${kpi('Mergers', fmt(s.merger_arb))}
+          ${kpi('✅ Official sourced', fmt(s.tier_official), 'kpi-official')}
+        </div>
+      </div>
+
+      <section class="about-section">
+        <h2>What you'll find here</h2>
+        <ul class="about-list">
+          <li><b>Spin-offs &amp; demergers.</b> Announced, pending, and recently completed.
+              With parent/spinco tickers, when-issued trading, distribution dates, and ratios.</li>
+          <li><b>Public mergers &amp; tender offers.</b> Cash, stock, and mixed consideration.
+              Offer price, current spread, expected close, shareholder vote / regulatory milestones.</li>
+          <li><b>IPOs with follow-through setup.</b> Direct listings, SPAC de-SPACs, and
+              traditional IPOs — filtered to issues with actual pricing and free float.</li>
+          <li><b>SPAC arbitrage.</b> Trust value vs. market, redemption windows, extension votes.
+              Hidden by default on the screener; toggle on with the <i>Show SPACs</i> check.</li>
+          <li><b>Insider transactions on the detail view.</b> US Form 4, UK RNS PDMR,
+              Sweden FI, Netherlands AFM, and Nordic MAR filings — buys, sells, cluster-buying
+              flags, and 6-month net-USD roll-up.</li>
+          <li><b>Short-interest overlay.</b> FINRA short-volume for US names, SSR disclosures
+              ≥0.5% for EU/UK names.</li>
+          <li><b>Per-deal news feed and timeline.</b> Primary-source press releases, regulatory
+              filings, and selected aggregator coverage — on the deal detail panel.</li>
+        </ul>
+      </section>
+
+      <section class="about-section">
+        <h2>Geographic scope</h2>
+        <p>Western developed markets only — deliberately.</p>
+        <div class="about-cols">
+          <div>
+            <h4 class="ok">✅ Covered</h4>
+            <ul class="about-list tight">
+              <li>United States (NYSE, Nasdaq, NYSE American)</li>
+              <li>United Kingdom (LSE Main, AIM)</li>
+              <li>Nordics (Stockholm, Copenhagen, Oslo, Helsinki)</li>
+              <li>Germany (Xetra / Frankfurt)</li>
+              <li>France (Euronext Paris)</li>
+              <li>Netherlands (Euronext Amsterdam)</li>
+              <li>Switzerland (SIX)</li>
+              <li>Italy (Borsa Italiana), Belgium, Ireland, Austria, Spain (lighter)</li>
+              <li>Canada (TSX) — where relevant cross-listings or spin-offs appear</li>
+            </ul>
+          </div>
+          <div>
+            <h4 class="no">⛔ Not covered</h4>
+            <ul class="about-list tight">
+              <li><b>China / Hong Kong / mainland A-shares.</b> Different disclosure regime,
+                  higher fraud tail-risk, non-fungible share classes. We don't track them.</li>
+              <li><b>Other emerging markets</b> — India, Brazil, LatAm, MENA, SE Asia,
+                  Russia, CIS, Africa.</li>
+              <li><b>Japan, Korea, Taiwan, Australia.</b> Developed, but outside current scope.</li>
+              <li><b>Private companies.</b> Public equities only — no private M&amp;A, no PE
+                  buyouts unless the target is listed.</li>
+              <li><b>Micro-caps and OTC pinks</b> without an institutional-grade disclosure trail.</li>
+              <li><b>Crypto, tokens, pre-IPO secondary markets.</b></li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="about-section">
+        <h2>Where the data comes from</h2>
+        <p>Official primary sources first, aggregators second. Every deal carries a source
+        tier label (<span class="pill pill-ok">✅ Official</span> or
+        <span class="pill pill-info">📊 Aggregator</span>) so you can see the provenance at a
+        glance.</p>
+        <ul class="about-list">
+          <li><b>Regulatory filings.</b> SEC EDGAR (10-K, 10-Q, 8-K, Form 4, S-1, S-4, 14A),
+              UK RNS (Takeover Panel rule announcements, PDMR), Nasdaq Nordic Globenewswire,
+              AFM Netherlands register, Sweden Finansinspektionen insynsregister,
+              French AMF, Italian Consob, German BaFin.</li>
+          <li><b>Company IR &amp; press releases.</b> Directly from issuer sites.</li>
+          <li><b>Market data.</b> Prices, market caps, and FX via public endpoints
+              (stockanalysis, Yahoo Finance) — used to render returns and spreads only,
+              not as the source of record for corporate events.</li>
+          <li><b>News aggregation.</b> Country-specific Google News queries in local
+              languages (Abspaltung, scission, afsplitsing, OPA, spin-off) for early signal.</li>
+        </ul>
+      </section>
+
+      <section class="about-section">
+        <h2>Known gaps &amp; limitations</h2>
+        <p class="about-caveat">Honest disclosure — this is a working research tool, not a
+        Bloomberg replacement.</p>
+        <ul class="about-list">
+          <li>Historical Europe backfill is thinner than US — the headline deals are in,
+              but expect gaps on mid-cap UK takeovers pre-2023 and continental European M&amp;A
+              outside the top names.</li>
+          <li>Finnish Nasdaq Helsinki PDMR insider filings are not yet wired in
+              (Sweden, UK, and Netherlands are).</li>
+          <li>Smaller continental Europe IPOs (non-Nordic) may be missing unless picked up
+              by news ingestion.</li>
+          <li>Short interest is FINRA-only for US; EU shows only ≥0.5% SSR-disclosed positions
+              (the short tail below 0.5% is invisible by regulation, not by choice).</li>
+        </ul>
+      </section>
+
+      <section class="about-section">
+        <h2>Not investment advice</h2>
+        <p class="about-caveat">
+          Everything on this site is for research and idea generation. Offer prices, spreads,
+          insider totals, and expected-close dates are assembled programmatically and will
+          contain errors. Always verify against the primary source linked on the deal detail
+          page before acting. Nothing here is a recommendation to buy or sell any security.
+        </p>
+      </section>
+    </div>
+  `;
 }
 
 // ---- Admin ----------------------------------------------------------------

@@ -468,3 +468,23 @@ tbody tr:last-child td { border-bottom: none; }
 .event-sub .event-headline { font-size: 12px; }
 .event-sub .event-summary { font-size: 11px; }
 .event-sub .event-link { font-size: 10px; }
+
+/* ---- About page ---------------------------------------------------------- */
+.about-page { max-width: 960px; margin: 0 auto; padding: 8px 4px 48px; }
+.about-hero { padding: 8px 0 20px; border-bottom: 1px solid var(--border); margin-bottom: 28px; }
+.about-hero h1 { font-size: 28px; margin: 0 0 12px; letter-spacing: -0.01em; }
+.about-lede { font-size: 15px; line-height: 1.65; color: var(--muted); margin: 0 0 20px; max-width: 760px; }
+.about-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.about-section { margin: 28px 0; padding-top: 4px; }
+.about-section h2 { font-size: 18px; margin: 0 0 10px; letter-spacing: -0.01em; }
+.about-section h4 { font-size: 13px; margin: 14px 0 8px; text-transform: uppercase; letter-spacing: 0.06em; }
+.about-section h4.ok { color: var(--accent); }
+.about-section h4.no { color: var(--warn); }
+.about-section p { margin: 0 0 12px; line-height: 1.6; color: var(--text); font-size: 14px; }
+.about-list { list-style: disc; margin: 0 0 4px; padding-left: 20px; }
+.about-list li { line-height: 1.6; margin-bottom: 8px; font-size: 14px; }
+.about-list.tight li { margin-bottom: 4px; font-size: 13px; }
+.about-list li b { color: var(--text); }
+.about-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 4px; }
+@media (max-width: 720px) { .about-cols { grid-template-columns: 1fr; gap: 8px; } }
+.about-caveat { color: var(--muted); font-size: 13px; line-height: 1.6; font-style: italic; }
