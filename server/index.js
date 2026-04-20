@@ -1014,6 +1014,7 @@ app.post('/api/admin/purge-junk-holders', requireAdmin, async (req, res) => {
     const r = await query(`
       DELETE FROM beneficial_holders
        WHERE position_pct IS NULL
+          OR (issuer_ticker IS NULL AND issuer_name IS NULL)
           OR holder_name ~ '^[0-9]{1,2}:[0-9]{2}'
           OR holder_name ILIKE 'https://%'
           OR holder_name ILIKE 'http://%'
@@ -1046,12 +1047,16 @@ app.post('/api/admin/upsert-holders', async (req, res) => {
     const { upsertHolder, inferHolderType } = require('./holder_feeds');
     let inserted = 0;
     const asOf = as_of_date || new Date().toISOString().slice(0, 10);
+    // Deal records don't have 'issuer_ticker' or 'issuer_name' columns.
+    // Derive them from the deal's actual columns.
+    const derivedTicker = d.primary_ticker || d.spinco_ticker || d.target_ticker || d.parent_ticker || null;
+    const derivedName   = d.target_name || d.spinco_name || d.parent_name || null;
     for (const h of holders) {
       if (!h || !h.holder_name) continue;
       const ok = await upsertHolder({
         source,
-        issuer_name: d.issuer_ticker || d.issuer_name,
-        issuer_ticker: d.issuer_ticker,
+        issuer_name: derivedName,
+        issuer_ticker: derivedTicker,
         isin: d.isin,
         holder_name: h.holder_name,
         holder_type: h.holder_type || inferHolderType(h.holder_name),
