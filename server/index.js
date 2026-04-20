@@ -912,6 +912,23 @@ app.get('/api/deals/:id/incentives', async (req, res) => {
   }
 });
 
+// Admin: search beneficial_holders by issuer or holder substring.
+app.get('/api/admin/holders-search', requireAdmin, async (req, res) => {
+  const q = String(req.query.q || '').trim().toLowerCase();
+  try {
+    const rows = await query(
+      `SELECT id, source, issuer_name, issuer_ticker, holder_name, holder_type,
+              as_of_date, shares, position_pct, value_usd, filing_url, is_13d
+       FROM beneficial_holders
+       WHERE LOWER(COALESCE(issuer_name,'')) LIKE $1 OR LOWER(COALESCE(holder_name,'')) LIKE $1
+       ORDER BY as_of_date DESC NULLS LAST, id DESC
+       LIMIT 100`,
+      [`%${q}%`]
+    );
+    res.json({ count: rows.length, rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Admin: search insider_transactions by issuer_name substring. Useful when
 // debugging why a specific deal's insider activity isn't rolling up.
 app.get('/api/admin/insider-search', requireAdmin, async (req, res) => {
