@@ -1491,8 +1491,13 @@ async function renderAbout() {
           <li><b>Insider transactions on the detail view.</b> US Form 4, UK RNS PDMR,
               Sweden FI, Netherlands AFM, and Nordic MAR filings — buys, sells, cluster-buying
               flags, and 6-month net-USD roll-up.</li>
-          <li><b>Short-interest overlay.</b> FINRA short-volume for US names, SSR disclosures
-              ≥0.5% for EU/UK names.</li>
+          <li><b>Top-20 beneficial holders &amp; ownership concentration.</b> US via Nasdaq.com
+              13F; EU via regulator registers (BaFin, AMF, AFM, FCA, FI, Finanstilsynet) and
+              company annual reports. Shows top-5 / top-10 / institutional / insider / strategic
+              splits and implied free float.</li>
+          <li><b>Disclosed short positions.</b> FINRA short-volume for US names; EU/UK SSR
+              positions ≥0.5% (Marshall Wace, Ilex Capital, GLG, etc.) with fund name, %,
+              regulator, and date.</li>
           <li><b>Per-deal news feed and timeline.</b> Primary-source press releases, regulatory
               filings, and selected aggregator coverage — on the deal detail panel.</li>
         </ul>
@@ -1558,9 +1563,11 @@ async function renderAbout() {
         <p class="about-caveat">Honest disclosure — this is a working research tool, not a
         Bloomberg replacement.</p>
         <ul class="about-list">
-          <li>Historical Europe backfill is thinner than US — the headline deals are in,
-              but expect gaps on mid-cap UK takeovers pre-2023 and continental European M&amp;A
-              outside the top names.</li>
+          <li>Historical Europe backfill now covers 2018-2025 spin-offs across
+              DE/FR/GB/NL/CH/SE/NO/DK/FI/IT/BE/AT (Daimler Truck, Porsche, UMG, Haleon, Sandoz,
+              Vitesco, Faurecia, Pluxee, Syensqo, Accelleron, Iveco, Alleima, Mandatum, and
+              ~30 others). Mid-cap UK takeovers pre-2023 and continental European M&amp;A
+              outside the top names still have gaps.</li>
           <li>Finnish Nasdaq Helsinki PDMR insider filings are not yet wired in
               (Sweden, UK, and Netherlands are).</li>
           <li>Smaller continental Europe IPOs (non-Nordic) may be missing unless picked up
