@@ -413,6 +413,73 @@ async function fetchAvanzaShareholders(symbol) {
 }
 
 // --------------------------------------------------------------------------
+// Nasdaq.com institutional-holdings (free public API). Works for US-listed
+// names — returns top holders with shares + market value, plus shares
+// outstanding so we can compute % position. No auth / CUSIP lookup needed.
+// --------------------------------------------------------------------------
+async function fetchNasdaqInstHoldings(ticker) {
+  if (!ticker) return [];
+  // Strip any exchange prefix like 'NYSE:' or 'NASDAQ:'.
+  const sym = String(ticker).replace(/^[A-Z]+:/, '').trim();
+  if (!sym || /[:.]/.test(sym)) return []; // Not a plain US ticker.
+  const url = `https://api.nasdaq.com/api/company/${encodeURIComponent(sym)}/institutional-holdings?limit=20&type=TOTAL&sortColumn=marketValue&sortOrder=DESC`;
+  try {
+    const r = await fetch(url, {
+      headers: { 'User-Agent': UA, 'Accept': 'application/json, text/plain, */*' },
+    });
+    if (!r.ok) return [];
+    const j = await r.json();
+    const data = j?.data || {};
+    if (!data.ownershipSummary) return [];
+    // Shares outstanding in millions — convert to raw.
+    const outStr = data.ownershipSummary?.ShareoutstandingTotal?.value || '';
+    const outM = parseFloat(String(outStr).replace(/,/g, ''));
+    const sharesOut = Number.isFinite(outM) && outM > 0 ? outM * 1e6 : null;
+    const asOfRow = (data.holdingsTransactions?.table?.rows || [])[0];
+    const asOf = asOfRow?.date ? normaliseDate(asOfRow.date) : today();
+    const rows = data.holdingsTransactions?.table?.rows || [];
+    const out = [];
+    for (const h of rows) {
+      const name = String(h.ownerName || '').trim();
+      if (!name) continue;
+      const shares = parseNum(h.sharesHeld);
+      if (!shares) continue;
+      // marketValue comes as '$1,491,767' — in thousands per Nasdaq's convention.
+      const mvK = parseNum(h.marketValue);
+      const valueUsd = mvK ? mvK * 1000 : null;
+      const pct = sharesOut ? +(100 * shares / sharesOut).toFixed(4) : null;
+      out.push({
+        source: 'nasdaq_13f',
+        issuer_ticker: sym,
+        holder_name: name,
+        as_of_date: asOf,
+        shares,
+        position_pct: pct,
+        value_usd: valueUsd,
+        raw_holder_type: 'institution',
+        filing_url: `https://www.nasdaq.com/market-activity/stocks/${sym.toLowerCase()}/institutional-holdings`,
+      });
+    }
+    return out;
+  } catch (e) {
+    console.error('[nasdaq_13f]', sym, e.message);
+    return [];
+  }
+}
+
+function parseNum(s) {
+  if (s == null) return null;
+  const n = parseFloat(String(s).replace(/[^0-9.\-]/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+function normaliseDate(s) {
+  // Nasdaq returns 'MM/DD/YYYY'.
+  const m = String(s).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m) return `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
+  return today();
+}
+
+// --------------------------------------------------------------------------
 // Unified runner — pulls all sources and persists.
 // --------------------------------------------------------------------------
 async function refreshHoldersForDeal(deal) {
@@ -423,13 +490,14 @@ async function refreshHoldersForDeal(deal) {
   const issuerName = deal.target_name || deal.spinco_name || deal.parent_name;
 
   let all = [];
-  // US path: 13F if we have a CIK + CUSIP (CUSIP not stored yet — we derive from SEC tickers JSON)
-  if (country === 'US' && deal.source_cik) {
-    const cusip = await lookupCusipForCik(deal.source_cik);
-    if (cusip) {
-      all.push(...await fetchSec13fForIssuer({
-        cik: deal.source_cik, cusip, ticker, issuerName,
-      }));
+  // US path: Nasdaq.com institutional-holdings (free, ticker-keyed).
+  // Replaces CUSIP-based 13F which is blocked by lack of CUSIP lookup.
+  const isUs = country === 'US' || deal.region === 'US';
+  if (isUs) {
+    all.push(...await fetchNasdaqInstHoldings(ticker));
+    // Also fetch parent ticker if separate (spin-offs often care about both).
+    if (deal.parent_ticker && deal.parent_ticker !== ticker) {
+      all.push(...await fetchNasdaqInstHoldings(deal.parent_ticker));
     }
   }
   // UK path: TR-1 RSS (broad — not per-issuer, caller deals with matching)
@@ -543,6 +611,7 @@ module.exports = {
   fetchAfmSubstantial,
   fetchNordicMajorHolders,
   fetchSec13fForIssuer,
+  fetchNasdaqInstHoldings,
   upsertHolder,
   inferHolderType,
 };
