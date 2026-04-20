@@ -534,6 +534,32 @@ app.post('/api/admin/null-offer-price', async (req, res) => {
   }
 });
 
+// Admin utility: delete deals from a given primary_source whose external_key
+// is NOT in the provided keep-list. Used to clean up stale entries after a
+// source's extraction logic has been tightened (e.g. Swiss TOB used to leak
+// buyback programmes as takeovers; after the filter fix, their external_keys
+// no longer appear, so we purge them).
+//
+// Body: { source: 'swiss_takeover_board', keep: ['swiss_tob:1010', ...] }
+app.post('/api/admin/purge-stale-source', async (req, res) => {
+  const adminOk = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  if (!adminOk) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const source = String(req.body?.source || '').trim();
+    const keep = Array.isArray(req.body?.keep) ? req.body.keep.filter(Boolean) : [];
+    if (!source) return res.status(400).json({ error: 'missing source' });
+    if (!keep.length) return res.status(400).json({ error: 'missing keep array (safety)' });
+    // Use parameterized IN list
+    const placeholders = keep.map((_, i) => `$${i+2}`).join(',');
+    const sql = `DELETE FROM deals WHERE primary_source = $1 AND external_key NOT IN (${placeholders}) RETURNING id, target_name, external_key`;
+    const result = await query(sql, [source, ...keep]);
+    const rows = result.rows || [];
+    res.json({ ok: true, deleted: rows.length, sample: rows.slice(0, 10) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Admin utility: refresh market data for a single deal by ID.
 // Useful when a bulk refresh-prices call silently errored on one symbol
 // (e.g. Yahoo rate-limit returning null). Does the same work as

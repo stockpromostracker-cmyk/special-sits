@@ -17,16 +17,37 @@ const UA = 'Mozilla/5.0 (compatible; SpecialSits/1.0; +https://special-sits.exam
 const TRANSACTIONS_URL = 'https://www.takeover.ch/transactions/all?language=en';
 const DETAIL_URL = (num) => `https://www.takeover.ch/transactions/detail/nr/${num}`;
 
-// Transaktionseigenschaft values that indicate a takeover (vs routine buyback).
-// If *only* buyback flags are present, we skip the record.
-const BUYBACK_ONLY_FLAGS = new Set([
-  'Rückkaufprogramm',
-  'Freistellung im Meldeverfahren',
-  'Rückkauf auf ordentlicher Linie',
-  'Rückkauf auf zweiter Linie',
-  'Rückkauf mit Put-Option',
-  'Rückkauf mittels Kaufofferte',
-]);
+// The Swiss TOB serves tooltips in English when Accept-Language is en-*,
+// German otherwise. We match both forms. Takeover flag regex is inclusive
+// across languages.
+const TAKEOVER_FLAGS_RE = [
+  // German
+  /\beingeleitetes\s+angebot\b/i,           // friendly/unfriendly announced offer
+  /\bbeendetes\s+angebot\b/i,               // friendly/unfriendly completed offer
+  /\bfreiwillige?\s+angebote?\b/i,          // voluntary offer(s)
+  /\bpflichtangebote?\b/i,                  // mandatory offer(s)
+  /\bkonkurrierende?\s+angebote?\b/i,       // competing offer(s)
+  /\bbarangebot\b/i,                        // cash offer
+  /\btauschangebot\b/i,                     // share exchange offer
+  /gemischtes\s+angebot/i,                  // mixed (cash + stock)
+  /\böffentliches\s+(?:kauf|tausch|umtausch|übernahme)\s*angebot\b/i,
+  /\bdekotierung/i,                          // delisting petition
+  /\bkraftloserklärung\b/i,                  // squeeze-out
+  /ausschluss\s+der\s+minderheits/i,         // minority squeeze-out
+  /\bopting\s*out\b/i,
+  // English
+  /(?:friendly|unfriendly|hostile)\s+(?:initiated|launched|announced|completed|terminated)\s+offer/i,
+  /\bmandatory\s+offers?\b/i,
+  /\bvoluntary\s+offers?\b/i,
+  /\bcompeting\s+offers?\b/i,
+  /\bcash\s+offer\b/i,
+  /\bexchange\s+offer\b/i,
+  /\bmixed\s+offer\b/i,
+  /\bpublic\s+(?:purchase|exchange|takeover)\s+offer\b/i,
+  /\bdelisting\s+(?:request|petition)\b/i,
+  /\bsqueeze[- ]?out\b/i,
+  /minority\s+shareholder/i,
+];
 
 async function fetchHtml(url) {
   const res = await fetch(url, {
@@ -70,11 +91,15 @@ function parseTransactions(html) {
       if (tt) target = tt[1].trim();
     }
 
-    // Deal characteristic flags
-    const typeMatch = inner.match(/data-tooltip="Transaktionseigenschaft:\s*([^"]+)"/);
+    // Deal characteristic flags. Server returns German "Transaktionseigenschaft:"
+    // or English "Transaction properties:" depending on Accept-Language.
+    const typeMatch = inner.match(/data-tooltip="(?:Transaktionseigenschaft|Transaction\s+properties):\s*([^"]+)"/i);
     const flagsRaw = typeMatch ? typeMatch[1].split(/<br\s*\/?>/).map(s => s.trim()).filter(Boolean) : [];
-    const nonBuybackFlags = flagsRaw.filter(f => !BUYBACK_ONLY_FLAGS.has(f));
-    const isBuybackOnly = flagsRaw.length > 0 && nonBuybackFlags.length === 0;
+    const hasTakeoverFlag = flagsRaw.some(f => TAKEOVER_FLAGS_RE.some(re => re.test(f)));
+    // A proper takeover MUST have at least one TAKEOVER_FLAGS_RE match.
+    // Filters out pure buyback programmes, reporting-exemption filings, and
+    // no-mandatory-offer determinations — none are takeover bids.
+    const isBuybackOnly = !hasTakeoverFlag;
 
     // Detail URL
     const detailMatch = inner.match(/href="(\/transactions\/detail\/nr\/\d+)"/);
