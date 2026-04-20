@@ -240,8 +240,17 @@ app.get('/api/deals', async (req, res, next) => {
   else if (timeframe === 'recent' || timeframe === 'last_30') {
     orderBy = 'completed_date DESC NULLS LAST, filing_date DESC NULLS LAST';
   }
+  // Pagination: limit/offset. Default limit 2000, max 5000 — covers full 5y history.
+  const rawLimit = Number(req.query.limit);
+  const rawOffset = Number(req.query.offset);
+  const limit  = Number.isFinite(rawLimit)  && rawLimit  > 0 ? Math.min(rawLimit, 5000) : 2000;
+  const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? rawOffset : 0;
+  params.push(limit);
+  const limitIdx = params.length;
+  params.push(offset);
+  const offsetIdx = params.length;
   const sql = `SELECT * FROM deals ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-               ORDER BY ${orderBy} LIMIT 500`;
+               ORDER BY ${orderBy} LIMIT $${limitIdx} OFFSET $${offsetIdx}`;
   const rows = await query(sql, params);
 
   // Batch-enrich with short-interest snapshots so the screener can show a
