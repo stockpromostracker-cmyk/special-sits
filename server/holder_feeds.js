@@ -424,8 +424,14 @@ async function fetchNasdaqInstHoldings(ticker) {
   if (!sym || /[:.]/.test(sym)) return []; // Not a plain US ticker.
   const url = `https://api.nasdaq.com/api/company/${encodeURIComponent(sym)}/institutional-holdings?limit=20&type=TOTAL&sortColumn=marketValue&sortOrder=DESC`;
   try {
+    // Nasdaq.com WAF rejects non-browser UAs — use a Chrome UA here only.
     const r = await fetch(url, {
-      headers: { 'User-Agent': UA, 'Accept': 'application/json, text/plain, */*' },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': `https://www.nasdaq.com/market-activity/stocks/${sym.toLowerCase()}/institutional-holdings`,
+      },
     });
     if (!r.ok) return [];
     const j = await r.json();
