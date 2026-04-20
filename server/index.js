@@ -540,7 +540,9 @@ app.post('/api/admin/null-offer-price', async (req, res) => {
 // buyback programmes as takeovers; after the filter fix, their external_keys
 // no longer appear, so we purge them).
 //
-// Body: { source: 'swiss_takeover_board', keep: ['swiss_tob:1010', ...] }
+// Body: { source: 'swiss_takeover_board', keep: ['https://.../detail/nr/0909', ...] }
+// Uses source_filing_url as the identity column (that is the actual dedupe
+// key on the deals table; external_key is stored inside the source_ids JSON).
 app.post('/api/admin/purge-stale-source', async (req, res) => {
   const adminOk = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
   if (!adminOk) return res.status(401).json({ error: 'unauthorized' });
@@ -549,9 +551,8 @@ app.post('/api/admin/purge-stale-source', async (req, res) => {
     const keep = Array.isArray(req.body?.keep) ? req.body.keep.filter(Boolean) : [];
     if (!source) return res.status(400).json({ error: 'missing source' });
     if (!keep.length) return res.status(400).json({ error: 'missing keep array (safety)' });
-    // Use parameterized IN list
     const placeholders = keep.map((_, i) => `$${i+2}`).join(',');
-    const sql = `DELETE FROM deals WHERE primary_source = $1 AND external_key NOT IN (${placeholders}) RETURNING id, target_name, external_key`;
+    const sql = `DELETE FROM deals WHERE primary_source = $1 AND source_filing_url NOT IN (${placeholders}) RETURNING id, target_name, source_filing_url`;
     const result = await query(sql, [source, ...keep]);
     const rows = result.rows || [];
     res.json({ ok: true, deleted: rows.length, sample: rows.slice(0, 10) });
