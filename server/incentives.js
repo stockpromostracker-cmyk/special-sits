@@ -105,10 +105,12 @@ async function rollupAll({ activeOnly = true, limit = 500 } = {}) {
   // Include completed deals up to 365 days old — insider activity around a
   // recently-completed spin-off (e.g. Coffee Stain in Dec 2025) is highly
   // material. Stale completed deals (>1y) are skipped to keep this fast.
+  // completed_date is stored as TEXT (ISO YYYY-MM-DD), hence the string compare.
+  const cutoffText = new Date(Date.now() - 365 * 86400 * 1000).toISOString().slice(0, 10);
   const where = activeOnly
     ? `WHERE status IN ('rumored','announced','pending')
           OR (status = 'completed' AND (completed_date IS NULL
-              OR completed_date >= ${process.env.DATABASE_URL ? "NOW() - INTERVAL '365 days'" : "date('now', '-365 days')"}))`
+              OR completed_date >= '${cutoffText}'))`
     : '';
   const rows = await query(`SELECT * FROM deals ${where} ORDER BY id DESC LIMIT $1`, [limit]);
   let ok = 0, skipped = 0;

@@ -911,6 +911,28 @@ app.get('/api/deals/:id/incentives', async (req, res) => {
   }
 });
 
+// Admin: search insider_transactions by issuer_name substring. Useful when
+// debugging why a specific deal's insider activity isn't rolling up.
+app.get('/api/admin/insider-search', requireAdmin, async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  if (!q) return res.status(400).json({ error: 'q required' });
+  try {
+    const rows = await query(
+      `SELECT id, source, issuer_name, issuer_country, insider_name, insider_title,
+              transaction_date, transaction_code, is_buy, shares, price_local,
+              currency, price_usd, value_usd, url
+       FROM insider_transactions
+       WHERE LOWER(issuer_name) LIKE $1
+       ORDER BY transaction_date DESC NULLS LAST, id DESC
+       LIMIT 200`,
+      [`%${q.toLowerCase()}%`]
+    );
+    res.json({ count: rows.length, rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Public read: insider-feed summary by source + country. Useful to verify
 // ingestion and expose regional coverage to the UI.
 app.get('/api/insider/summary', async (_req, res) => {
