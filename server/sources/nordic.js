@@ -30,6 +30,12 @@ const KEYWORDS = [
   { re: /\b(offentligt .*erbjudande|\bbud p\u00e5\b)\b/i,  event: 'merger_pending', deal: 'merger_arb' }, // SE
   { re: /\b(pliktig tilbud|frivilligt tilbud)\b/i,         event: 'merger_pending', deal: 'merger_arb' }, // NO/DK
   { re: /\bostotarjous\b/i,                                event: 'merger_pending', deal: 'merger_arb' }, // FI
+  // Rights issue / capital raise
+  { re: /\brights issue\b/i,                               event: 'rights_offering', deal: 'rights' },
+  { re: /\b(f\u00f6retr\u00e4desemission|nyemission)\b/i, event: 'rights_offering', deal: 'rights' }, // SE
+  { re: /\bfortrinnsrettsemisjon\b/i,                     event: 'rights_offering', deal: 'rights' }, // NO
+  // Strategic review (early-stage catalyst, signals pending action)
+  { re: /\b(strategic review|strategisk \u00f6versyn|strategic alternatives)\b/i, event: 'strategic_review', deal: 'other' },
 ];
 
 // Nordic country codes we accept. MFN's <x:scope> can be a single ISO code

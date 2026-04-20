@@ -197,6 +197,15 @@ async function fetchGoogleNews() {
     { name: 'activist',    q: '"13D filing" OR "activist investor" OR "proxy contest"', geo: 'US', when: '7d' },
     { name: 'take_private', q: '"take private" OR "management buyout" OR "going private"', geo: 'US', when: '7d' },
     { name: 'nordic',      q: '"Nasdaq Stockholm" OR "Nasdaq Copenhagen" OR "Oslo Børs" acquisition OR merger OR IPO', geo: 'GB', when: '7d' },
+    // Country-specific EU special-sits queries
+    { name: 'de_spinoff',  q: '"Abspaltung" OR "Spin-off" Xetra OR Frankfurt', geo: 'DE', when: '14d' },
+    { name: 'de_takeover', q: '"Übernahmeangebot" OR "Pflichtangebot" BaFin', geo: 'DE', when: '14d' },
+    { name: 'fr_spinoff',  q: '"scission" OR "spin-off" Euronext Paris', geo: 'FR', when: '14d' },
+    { name: 'fr_offer',    q: '"offre publique d\'achat" OR OPA', geo: 'FR', when: '14d' },
+    { name: 'nl_spinoff',  q: '"demerger" OR "afsplitsing" Euronext Amsterdam', geo: 'NL', when: '14d' },
+    { name: 'nl_offer',    q: '"openbaar bod" OR "tender offer" AFM', geo: 'NL', when: '14d' },
+    { name: 'ch_spinoff',  q: '"spin-off" SIX Swiss Exchange', geo: 'CH', when: '14d' },
+    { name: 'it_offer',    q: '"OPA" OR "offerta pubblica di acquisto" Borsa Italiana', geo: 'IT', when: '14d' },
   ];
 
   const results = await Promise.all(
