@@ -1006,6 +1006,71 @@ app.post('/api/admin/refresh-holders', async (req, res) => {
   }
 });
 
+// Purge junk rows in beneficial_holders. Rows with NULL position_pct OR
+// suspicious holder_name (timestamps / URLs / generic RNS prefixes) are
+// deleted. Returns deleted count. Admin-only.
+app.post('/api/admin/purge-junk-holders', requireAdmin, async (req, res) => {
+  try {
+    const r = await query(`
+      DELETE FROM beneficial_holders
+       WHERE position_pct IS NULL
+          OR holder_name ~ '^[0-9]{1,2}:[0-9]{2}'
+          OR holder_name ILIKE 'https://%'
+          OR holder_name ILIKE 'http://%'
+          OR issuer_name ILIKE 'Holding(s) in Company%'
+          OR issuer_name ILIKE 'TR-1%'
+          OR length(trim(holder_name)) < 3
+    `);
+    res.json({ ok: true, deleted: r.rowCount || 0 });
+  } catch (e) {
+    console.error('[purge-junk-holders]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Batch-upsert beneficial holders for a given deal. Used when ingesting
+// top-holder snapshots that come from per-company scrapers / research
+// subagents / annual-report PDFs. Body: { deal_id, source, as_of_date,
+// holders: [{ holder_name, holder_type?, shares?, position_pct?, value_usd?, filing_url?, is_13d? }] }
+app.post('/api/admin/upsert-holders', async (req, res) => {
+  const ingestOk = INGEST_TOKEN && req.header('x-ingest-token') === INGEST_TOKEN;
+  const adminOk  = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  if (!ingestOk && !adminOk) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const { deal_id, source, as_of_date, holders } = req.body || {};
+    if (!deal_id || !source || !Array.isArray(holders)) {
+      return res.status(400).json({ error: 'deal_id, source, holders[] required' });
+    }
+    const [d] = await query(`SELECT * FROM deals WHERE id = $1`, [deal_id]);
+    if (!d) return res.status(404).json({ error: 'deal not found' });
+    const { upsertHolder, inferHolderType } = require('./holder_feeds');
+    let inserted = 0;
+    const asOf = as_of_date || new Date().toISOString().slice(0, 10);
+    for (const h of holders) {
+      if (!h || !h.holder_name) continue;
+      const ok = await upsertHolder({
+        source,
+        issuer_name: d.issuer_ticker || d.issuer_name,
+        issuer_ticker: d.issuer_ticker,
+        isin: d.isin,
+        holder_name: h.holder_name,
+        holder_type: h.holder_type || inferHolderType(h.holder_name),
+        as_of_date: h.as_of_date || asOf,
+        shares: h.shares || null,
+        position_pct: h.position_pct || null,
+        value_usd: h.value_usd || null,
+        filing_url: h.filing_url || null,
+        is_13d: h.is_13d ? 1 : 0,
+      });
+      if (ok) inserted++;
+    }
+    res.json({ ok: true, inserted });
+  } catch (e) {
+    console.error('[upsert-holders]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Refresh short-interest feeds (FINRA/AFM/FCA). Admin or ingest token.
 // ?days=N controls FINRA day window (default 3, FCA/AFM always a single snapshot).
 app.post('/api/admin/refresh-short', async (req, res) => {
