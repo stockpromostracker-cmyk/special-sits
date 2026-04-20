@@ -540,6 +540,61 @@ app.post('/api/admin/null-offer-price', async (req, res) => {
 // buyback programmes as takeovers; after the filter fix, their external_keys
 // no longer appear, so we purge them).
 //
+// Admin utility: collapse duplicate rows for a given (primary_ticker, deal_type)
+// into a single row. Used to clean up serial-amendment duplicates (e.g. three
+// 10-12B/A filings for Versant Media all saved as separate deals).
+//
+// Rule: keep ONE row (the most recent filing_date), optionally override status
+// and completed_date, delete the rest.
+//
+// Body: {
+//   ticker: 'VSNT',
+//   deal_type: 'spin_off',          // optional, filter to this type
+//   event_type: 'spin_off_completed',// optional, override on the kept row
+//   status: 'completed',            // optional, override on the kept row
+//   completed_date: '2026-01-02'    // optional, override on the kept row
+// }
+app.post('/api/admin/collapse-duplicates', async (req, res) => {
+  const adminOk = ADMIN_PASSWORD && req.header('x-admin-password') === ADMIN_PASSWORD;
+  if (!adminOk) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const ticker = String(req.body?.ticker || '').trim().toUpperCase();
+    if (!ticker) return res.status(400).json({ error: 'missing ticker' });
+    const dealType = req.body?.deal_type ? String(req.body.deal_type).trim() : null;
+    const override = {};
+    if (req.body?.event_type)     override.event_type = String(req.body.event_type);
+    if (req.body?.status)         override.status = String(req.body.status);
+    if (req.body?.completed_date) override.completed_date = String(req.body.completed_date);
+
+    const params = [ticker];
+    let where = `primary_ticker = $1`;
+    if (dealType) { params.push(dealType); where += ` AND deal_type = $2`; }
+    const rows = (await query(`SELECT id, primary_ticker, filing_date, announce_date, status, event_type, completed_date FROM deals WHERE ${where} ORDER BY filing_date DESC NULLS LAST, announce_date DESC NULLS LAST, id DESC`, params)).rows || [];
+    if (rows.length === 0) return res.json({ ok: true, kept: null, deleted: 0 });
+    if (rows.length === 1) {
+      // Still apply overrides if any
+      if (Object.keys(override).length) {
+        const sets = Object.keys(override).map((k, i) => `${k} = $${i+1}`);
+        const vals = Object.values(override); vals.push(rows[0].id);
+        await query(`UPDATE deals SET ${sets.join(', ')} WHERE id = $${vals.length}`, vals);
+      }
+      return res.json({ ok: true, kept: rows[0].id, deleted: 0, applied: override });
+    }
+    const keepId = rows[0].id;
+    const deleteIds = rows.slice(1).map(r => r.id);
+    const placeholders = deleteIds.map((_, i) => `$${i+1}`).join(',');
+    await query(`DELETE FROM deals WHERE id IN (${placeholders})`, deleteIds);
+    if (Object.keys(override).length) {
+      const sets = Object.keys(override).map((k, i) => `${k} = $${i+1}`);
+      const vals = Object.values(override); vals.push(keepId);
+      await query(`UPDATE deals SET ${sets.join(', ')} WHERE id = $${vals.length}`, vals);
+    }
+    res.json({ ok: true, kept: keepId, deleted: deleteIds.length, applied: override });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Body: { source: 'swiss_takeover_board', keep: ['https://.../detail/nr/0909', ...] }
 // Uses source_filing_url as the identity column (that is the actual dedupe
 // key on the deals table; external_key is stored inside the source_ids JSON).

@@ -495,11 +495,47 @@ async function fetchAll({ since } = {}) {
 
   // De-dupe by external_key (same filing appearing in multiple passes shouldn't happen,
   // but defensive)
-  const seen = new Set();
+  const seenKey = new Set();
   results.deals = results.deals.filter(d => {
-    if (seen.has(d.external_key)) return false;
-    seen.add(d.external_key); return true;
+    if (seenKey.has(d.external_key)) return false;
+    seenKey.add(d.external_key); return true;
   });
+
+  // Collapse serial amendments into one row per (deal_family, ticker).
+  // Example: Versant Media (VSNT) filed 10-12B on Oct 31, 10-12B/A on Nov 18,
+  // 10-12B/A on Dec 3 — all three are the SAME spin, not three separate deals.
+  // Rule: keep the most recent filing (by filing_date). If any 8-K/2.01
+  // "distribution completed" filing exists for the same ticker, it wins
+  // regardless of date — completed status is more informative than pending.
+  //
+  // Bucket key is (family, ticker) where family is 'spin_off', 'ipo', or
+  // 'merger'. Separate families so a company that later IPOs its own spin
+  // isn't collapsed across them.
+  const familyOf = (ev) => {
+    if (ev.startsWith('spin_off')) return 'spin_off';
+    if (ev.startsWith('ipo')) return 'ipo';
+    if (ev.startsWith('merger')) return 'merger';
+    return 'other';
+  };
+  const buckets = new Map();
+  for (const d of results.deals) {
+    const ticker = d.primary_ticker || d.spinco_ticker || d.target_ticker;
+    if (!ticker) { buckets.set(`nokey:${d.external_key}`, d); continue; }
+    const key = `${familyOf(d.event_type)}|${ticker}`;
+    const prev = buckets.get(key);
+    if (!prev) { buckets.set(key, d); continue; }
+    // Completed beats pending.
+    const dCompleted = d.status === 'completed' || d.event_type.endsWith('_completed') || d.event_type === 'ipo_recent';
+    const pCompleted = prev.status === 'completed' || prev.event_type.endsWith('_completed') || prev.event_type === 'ipo_recent';
+    if (dCompleted && !pCompleted) { buckets.set(key, d); continue; }
+    if (pCompleted && !dCompleted) continue;
+    // Same completion state — keep the most recent filing
+    const dDate = d.filing_date || d.announce_date || '';
+    const pDate = prev.filing_date || prev.announce_date || '';
+    if (dDate > pDate) buckets.set(key, d);
+  }
+  results.deals = Array.from(buckets.values());
+
   // Drop deals with no ticker: EDGAR display_names occasionally omits it, but we need
   // a public ticker to be useful. Keep CIK so a later run can retry resolution.
   results.deals_with_ticker = results.deals.filter(d => d.primary_ticker);
